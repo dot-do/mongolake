@@ -1,0 +1,86 @@
+{
+  "name": "mongolake",
+  "version": "0.1.0",
+  "description": "MongoDB re-imagined for the lakehouse era",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/client/index.d.ts",
+      "import": "./dist/client/index.js"
+    },
+    "./worker": {
+      "types": "./dist/worker/index.d.ts",
+      "import": "./dist/worker/index.js"
+    },
+    "./do": {
+      "types": "./dist/do/index.d.ts",
+      "import": "./dist/do/index.js"
+    },
+    "./storage": {
+      "types": "./dist/storage/index.d.ts",
+      "import": "./dist/storage/index.js"
+    },
+    "./parquet": {
+      "types": "./dist/parquet/index.d.ts",
+      "import": "./dist/parquet/index.js"
+    }
+  },
+  "bin": {
+    "mongolake": "./dist/cli/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "build:cli": "bun build src/cli/index.ts --compile --outfile dist/mongolake",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mongodb",
+    "database",
+    "lakehouse",
+    "parquet",
+    "iceberg",
+    "cloudflare",
+    "workers",
+    "r2",
+    "duckdb"
+  ],
+  "author": "dotdo",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dot-do/mongolake"
+  },
+  "homepage": "https://mongolake.com",
+  "dependencies": {
+    "oauth.do": "^0.2.0",
+    "rpc.do": "^0.2.0",
+    "@dotdo/cli": "^0.1.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240117.0",
+    "@types/node": "^20.10.0",
+    "mongodb": "^6.3.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.2.0",
+    "wrangler": "^3.22.0"
+  },
+  "peerDependencies": {
+    "@cloudflare/workers-types": "^4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@cloudflare/workers-types": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
