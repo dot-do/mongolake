@@ -13,12 +13,19 @@ npm install mongolake
 
 MongoLake is a MongoDB-compatible database that stores data as Parquet files. It combines the developer experience of MongoDB with the analytical power of the lakehouse.
 
-- **100% MongoDB API compatible** - mongosh, Compass, and all drivers just work
-- **Local-first development** - SQLite-simple file-based storage
-- **Git-like workflow** - Branch, push, pull, merge databases
-- **Lakehouse-native** - Iceberg integration, schema evolution, time travel
-- **Query anywhere** - DuckDB, Spark, Trino can read your data directly
-- **Cloudflare-native** - Deploy globally on Workers + R2
+**Core Features:**
+- **MongoDB API** - Familiar CRUD operations (insertOne, find, update, delete)
+- **Local-first development** - File-based storage with `.mongolake/` directory
+- **Lakehouse-native** - Data stored as queryable Parquet files
+- **Cloudflare Workers** - Deploy globally on Workers + R2
+- **Variant encoding** - Automatic handling of flexible document schemas
+- **Multiple storage backends** - Local filesystem, Cloudflare R2, S3-compatible storage
+
+**Coming Soon:**
+- Wire Protocol (MongoDB server compatibility)
+- Branching and merging
+- Time travel queries
+- Full Iceberg integration
 
 ## Quick Start
 
@@ -38,27 +45,28 @@ await users.insertOne({
 const user = await users.findOne({ email: 'alice@example.com' });
 ```
 
-### With CLI
+### Deploy to Cloudflare Workers
 
-```bash
-# Start local dev server with MongoDB wire protocol
-mongolake dev
+```typescript
+// worker.ts
+import { MongoLakeWorker } from 'mongolake/worker';
+import { MongoLakeDO } from 'mongolake/do';
 
-# Connect with mongosh
-mongosh mongodb://localhost:27017/myapp
-
-# Or use the built-in shell
-mongolake shell myapp
+export default MongoLakeWorker;
+export { MongoLakeDO };
 ```
 
-### Deploy to Cloudflare
+```toml
+# wrangler.toml
+name = "my-mongolake"
 
-```bash
-# Push local database to production
-mongolake push --remote wss://your-worker.workers.dev
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "my-data"
 
-# Or deploy your own MongoLake worker
-wrangler deploy
+[[durable_objects.bindings]]
+name = "SHARD"
+class_name = "MongoLakeDO"
 ```
 
 ## Features
@@ -122,39 +130,22 @@ const lake = new MongoLake({
 });
 ```
 
-### Branching & Time Travel
+### Branching & Time Travel (Coming Soon)
+
+Branching and time travel features are planned but not yet implemented. They will enable:
 
 ```typescript
-// Create a branch
+// Create a branch (not yet implemented)
 await db('myapp').branch('feature-x');
 
-// Work on the branch
-const branch = db('myapp', { branch: 'feature-x' });
-await branch.collection('users').insertOne({ name: 'Test' });
-
-// Query at a point in time
+// Query at a point in time (not yet implemented)
 const historical = db('myapp', { asOf: '2024-01-15T00:00:00Z' });
 const oldData = await historical.collection('users').find({});
-
-// Merge branch back
-await db('myapp').merge('feature-x');
 ```
 
-### Wire Protocol Proxy
+### Wire Protocol (Coming Soon)
 
-Use mongosh, Compass, or any MongoDB driver:
-
-```bash
-# Start proxy with Cloudflare tunnel
-mongolake proxy --tunnel
-
-# Output:
-#   Local:  mongodb://localhost:27017
-#   Tunnel: mongodb://abc123.cfargotunnel.com
-
-# Connect from anywhere
-mongosh mongodb://abc123.cfargotunnel.com/myapp
-```
+MongoDB wire protocol compatibility (mongosh, Compass) is planned but not yet implemented.
 
 ## Architecture
 
@@ -227,43 +218,35 @@ const lake = new MongoLake({
 });
 ```
 
-## CLI Reference
+## Implementation Status
 
-```bash
-mongolake dev [--port 27017] [--local .mongolake] [--tunnel]
-  Start local development server
+### Implemented (✅)
 
-mongolake shell <database>
-  Interactive shell
+- **Client API** - Full MongoDB-compatible CRUD operations
+  - `insertOne`, `insertMany`, `findOne`, `find`, `updateOne`, `updateMany`, `deleteOne`, `deleteMany`
+- **Parquet I/O** - Read/write Parquet files with hyparquet and hyparquet-writer
+- **Variant encoding** - Automatic handling of schema-less fields as Parquet variant type
+- **Storage backends** - Local filesystem, Cloudflare R2, S3-compatible endpoints
+- **Worker & Durable Object** - Cloudflare Workers deployment with RPC interface
 
-mongolake proxy [--remote <url>] [--tunnel [name]]
-  Start wire protocol proxy
+### Partial Implementation (🚧)
 
-mongolake push [--remote <url>]
-  Push local database to remote
+- **Aggregation pipeline** - Basic stages: `$match`, `$group`, `$project`, `$sort`, `$limit`, `$skip`
+- **Filter operators** - `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$exists`, `$regex`, `$not`
+- **Update operators** - `$set`, basic field updates (other operators incomplete)
 
-mongolake pull [--remote <url>]
-  Pull remote database to local
+### Not Yet Implemented (❌)
 
-mongolake branch <name>
-  Create a new branch
+- **CLI tooling** - `mongolake dev`, `shell`, `push`, `pull`, `branch`, `merge` commands
+- **Wire Protocol server** - TCP MongoDB protocol proxy (mongosh, Compass compatibility)
+- **Indexes** - Index creation and query optimization
+- **Iceberg integration** - Full Iceberg metadata management
+- **Branching & merging** - Database versioning with Git-like workflows
+- **Time travel** - Point-in-time snapshot queries
 
-mongolake merge <branch>
-  Merge branch into main
+## Deploy to Cloudflare Workers
 
-mongolake compact <database> [collection]
-  Compact Parquet files
-
-mongolake tunnel create <name>
-  Create named Cloudflare tunnel
-
-mongolake login
-  Authenticate with mongolake.com
-```
-
-## Self-Hosting
-
-Deploy your own MongoLake:
+Deploy MongoLake as a Cloudflare Worker with Durable Object persistence:
 
 ```typescript
 // worker.ts
@@ -286,6 +269,8 @@ bucket_name = "my-data"
 name = "SHARD"
 class_name = "MongoLakeDO"
 ```
+
+The Worker provides an RPC interface for MongoLake operations, while Durable Objects handle Write-Ahead Logging (WAL) and buffering.
 
 ## License
 
