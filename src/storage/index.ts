@@ -8,7 +8,7 @@
  * - In-memory (for testing)
  */
 
-import type { R2Bucket, R2Object, R2ObjectBody, MongoLakeConfig } from '../types.js';
+import type { R2Bucket, MongoLakeConfig } from '../types.js';
 
 // ============================================================================
 // Storage Interface
@@ -46,6 +46,25 @@ export interface MultipartUpload {
 export interface UploadedPart {
   partNumber: number;
   etag: string;
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+/**
+ * Concatenates an array of Uint8Array parts into a single Uint8Array.
+ * Parts are concatenated in the order provided.
+ */
+export function concatenateParts(parts: Uint8Array[]): Uint8Array {
+  const totalSize = parts.reduce((sum, part) => sum + part.length, 0);
+  const combined = new Uint8Array(totalSize);
+  let offset = 0;
+  for (const part of parts) {
+    combined.set(part, offset);
+    offset += part.length;
+  }
+  return combined;
 }
 
 // ============================================================================
@@ -186,14 +205,8 @@ export class FileSystemStorage implements StorageBackend {
       async complete(uploadedParts: UploadedPart[]): Promise<void> {
         // Concatenate parts in order
         const sortedParts = uploadedParts.sort((a, b) => a.partNumber - b.partNumber);
-        const totalSize = sortedParts.reduce((sum, p) => sum + (parts.get(p.partNumber)?.length || 0), 0);
-        const combined = new Uint8Array(totalSize);
-        let offset = 0;
-        for (const p of sortedParts) {
-          const data = parts.get(p.partNumber)!;
-          combined.set(data, offset);
-          offset += data.length;
-        }
+        const sortedData = sortedParts.map((p) => parts.get(p.partNumber)!);
+        const combined = concatenateParts(sortedData);
         await self.put(key, combined);
       },
 
@@ -247,11 +260,9 @@ export class R2Storage implements StorageBackend {
   }
 
   async head(key: string): Promise<{ size: number } | null> {
-    const obj = await this.bucket.get(key);
+    const obj = await this.bucket.head(key);
     if (!obj) return null;
-    // R2ObjectBody doesn't directly expose size, need to get from arrayBuffer
-    const buffer = await obj.arrayBuffer();
-    return { size: buffer.byteLength };
+    return { size: obj.size };
   }
 
   async createMultipartUpload(key: string): Promise<MultipartUpload> {
@@ -286,6 +297,61 @@ export interface S3Config {
   region?: string;
 }
 
+// AWS Signature Version 4 helper functions
+const EMPTY_PAYLOAD_HASH = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+
+/**
+ * Convert a Uint8Array to a hex string
+ */
+function toHex(data: Uint8Array): string {
+  return Array.from(data)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+/**
+ * Compute SHA-256 hash of data and return as hex string
+ */
+async function sha256Hex(data: string | Uint8Array): Promise<string> {
+  const encoder = new TextEncoder();
+  const dataBytes = typeof data === 'string' ? encoder.encode(data) : data;
+  const hashBuffer = await crypto.subtle.digest('SHA-256', dataBytes);
+  return toHex(new Uint8Array(hashBuffer));
+}
+
+/**
+ * Compute HMAC-SHA256 and return raw bytes
+ */
+async function hmacSha256(key: Uint8Array, data: string): Promise<Uint8Array> {
+  const encoder = new TextEncoder();
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw',
+    key,
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const signature = await crypto.subtle.sign('HMAC', cryptoKey, encoder.encode(data));
+  return new Uint8Array(signature);
+}
+
+/**
+ * Derive the AWS Signature Version 4 signing key
+ */
+async function getSigningKey(
+  secretKey: string,
+  dateStamp: string,
+  region: string,
+  service: string
+): Promise<Uint8Array> {
+  const encoder = new TextEncoder();
+  const kDate = await hmacSha256(encoder.encode('AWS4' + secretKey), dateStamp);
+  const kRegion = await hmacSha256(kDate, region);
+  const kService = await hmacSha256(kRegion, service);
+  const kSigning = await hmacSha256(kService, 'aws4_request');
+  return kSigning;
+}
+
 export class S3Storage implements StorageBackend {
   private config: S3Config;
 
@@ -296,22 +362,105 @@ export class S3Storage implements StorageBackend {
     };
   }
 
+  /**
+   * Sign an S3 request using AWS Signature Version 4.
+   * This implementation properly hashes the payload for request integrity.
+   */
   private async signRequest(
     method: string,
     key: string,
     headers: Record<string, string> = {},
     body?: Uint8Array
   ): Promise<{ url: string; headers: Record<string, string> }> {
-    // Simplified S3 signing - in production, use proper AWS4 signing
-    const url = `${this.config.endpoint}/${this.config.bucket}/${key}`;
-    const date = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '');
+    const service = 's3';
+    const region = this.config.region || 'auto';
 
-    // Basic auth header (works with many S3-compatible services)
-    const authHeaders = {
+    // Parse endpoint to get host
+    const endpointUrl = new URL(this.config.endpoint);
+    const host = endpointUrl.host;
+
+    // Build the URL path
+    const encodedKey = key
+      .split('/')
+      .map((segment) => encodeURIComponent(segment))
+      .join('/');
+    const url = `${this.config.endpoint}/${this.config.bucket}/${encodedKey}`;
+    const canonicalUri = `/${this.config.bucket}/${encodedKey}`;
+
+    // Get timestamps
+    const now = new Date();
+    const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
+    const dateStamp = amzDate.substring(0, 8);
+
+    // Calculate payload hash - this is the security fix
+    // Previously used UNSIGNED-PAYLOAD which disables integrity checking
+    const payloadHash = body ? await sha256Hex(body) : EMPTY_PAYLOAD_HASH;
+
+    // Build canonical headers (must be sorted and lowercase)
+    const canonicalHeaders: Record<string, string> = {
+      host: host,
+      'x-amz-content-sha256': payloadHash,
+      'x-amz-date': amzDate,
+      ...Object.fromEntries(
+        Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v])
+      ),
+    };
+
+    // Sort headers alphabetically
+    const sortedHeaderKeys = Object.keys(canonicalHeaders).sort();
+    const canonicalHeadersString = sortedHeaderKeys
+      .map((k) => `${k}:${canonicalHeaders[k]}`)
+      .join('\n');
+    const signedHeaders = sortedHeaderKeys.join(';');
+
+    // Build canonical request
+    const canonicalQueryString = ''; // No query params for basic operations
+    const canonicalRequest = [
+      method,
+      canonicalUri,
+      canonicalQueryString,
+      canonicalHeadersString + '\n',
+      signedHeaders,
+      payloadHash,
+    ].join('\n');
+
+    // Calculate hash of canonical request
+    const canonicalRequestHash = await sha256Hex(canonicalRequest);
+
+    // Build string to sign
+    const algorithm = 'AWS4-HMAC-SHA256';
+    const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
+    const stringToSign = [
+      algorithm,
+      amzDate,
+      credentialScope,
+      canonicalRequestHash,
+    ].join('\n');
+
+    // Calculate signature
+    const signingKey = await getSigningKey(
+      this.config.secretAccessKey,
+      dateStamp,
+      region,
+      service
+    );
+    const signatureBytes = await hmacSha256(signingKey, stringToSign);
+    const signature = toHex(signatureBytes);
+
+    // Build authorization header
+    const authorization = [
+      `${algorithm} Credential=${this.config.accessKeyId}/${credentialScope}`,
+      `SignedHeaders=${signedHeaders}`,
+      `Signature=${signature}`,
+    ].join(', ');
+
+    // Build final headers
+    const authHeaders: Record<string, string> = {
       ...headers,
-      'x-amz-date': date,
-      'x-amz-content-sha256': 'UNSIGNED-PAYLOAD',
-      Authorization: `AWS4-HMAC-SHA256 Credential=${this.config.accessKeyId}`,
+      host: host,
+      'x-amz-date': amzDate,
+      'x-amz-content-sha256': payloadHash,
+      Authorization: authorization,
     };
 
     return { url, headers: authHeaders };
@@ -327,10 +476,16 @@ export class S3Storage implements StorageBackend {
   }
 
   async put(key: string, data: Uint8Array): Promise<void> {
-    const { url, headers } = await this.signRequest('PUT', key, {
-      'Content-Type': 'application/octet-stream',
-      'Content-Length': String(data.length),
-    });
+    // Pass body to signRequest for proper payload hash computation
+    const { url, headers } = await this.signRequest(
+      'PUT',
+      key,
+      {
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': String(data.length),
+      },
+      data
+    );
     const response = await fetch(url, {
       method: 'PUT',
       headers,
@@ -391,14 +546,8 @@ export class S3Storage implements StorageBackend {
 
       async complete(uploadedParts: UploadedPart[]): Promise<void> {
         const sortedParts = uploadedParts.sort((a, b) => a.partNumber - b.partNumber);
-        const totalSize = sortedParts.reduce((sum, p) => sum + (parts.get(p.partNumber)?.length || 0), 0);
-        const combined = new Uint8Array(totalSize);
-        let offset = 0;
-        for (const p of sortedParts) {
-          const data = parts.get(p.partNumber)!;
-          combined.set(data, offset);
-          offset += data.length;
-        }
+        const sortedData = sortedParts.map((p) => parts.get(p.partNumber)!);
+        const combined = concatenateParts(sortedData);
         await self.put(key, combined);
       },
 
@@ -454,14 +603,8 @@ export class MemoryStorage implements StorageBackend {
 
       async complete(uploadedParts: UploadedPart[]): Promise<void> {
         const sortedParts = uploadedParts.sort((a, b) => a.partNumber - b.partNumber);
-        const totalSize = sortedParts.reduce((sum, p) => sum + (parts.get(p.partNumber)?.length || 0), 0);
-        const combined = new Uint8Array(totalSize);
-        let offset = 0;
-        for (const p of sortedParts) {
-          const data = parts.get(p.partNumber)!;
-          combined.set(data, offset);
-          offset += data.length;
-        }
+        const sortedData = sortedParts.map((p) => parts.get(p.partNumber)!);
+        const combined = concatenateParts(sortedData);
         await self.put(key, combined);
       },
 

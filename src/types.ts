@@ -20,6 +20,14 @@ export type BSONValue =
   | BSONValue[]
   | { [key: string]: BSONValue };
 
+// Module-level state for ObjectId generation (initialized once per process)
+const objectIdState = {
+  // 5-byte random value, generated once per process
+  randomBytes: crypto.getRandomValues(new Uint8Array(5)),
+  // 3-byte counter, initialized to a random value and incremented for each ObjectId
+  counter: Math.floor(Math.random() * 0xffffff),
+};
+
 /** MongoDB ObjectId */
 export class ObjectId {
   private readonly bytes: Uint8Array;
@@ -50,10 +58,15 @@ export class ObjectId {
     bytes[1] = (timestamp >> 16) & 0xff;
     bytes[2] = (timestamp >> 8) & 0xff;
     bytes[3] = timestamp & 0xff;
-    // Random (5 bytes)
-    crypto.getRandomValues(bytes.subarray(4, 9));
-    // Counter (3 bytes)
-    const counter = Math.floor(Math.random() * 0xffffff);
+    // Random value (5 bytes) - same for all ObjectIds in this process
+    bytes[4] = objectIdState.randomBytes[0];
+    bytes[5] = objectIdState.randomBytes[1];
+    bytes[6] = objectIdState.randomBytes[2];
+    bytes[7] = objectIdState.randomBytes[3];
+    bytes[8] = objectIdState.randomBytes[4];
+    // Counter (3 bytes) - incrementing, wraps at 0xffffff
+    const counter = objectIdState.counter;
+    objectIdState.counter = (objectIdState.counter + 1) & 0xffffff;
     bytes[9] = (counter >> 16) & 0xff;
     bytes[10] = (counter >> 8) & 0xff;
     bytes[11] = counter & 0xff;
@@ -94,10 +107,8 @@ export interface Document {
   [key: string]: BSONValue | undefined;
 }
 
-/** Document with required _id */
-export interface WithId<T extends Document> extends T {
-  _id: string | ObjectId;
-}
+/** Document with required _id (uses intersection to preserve T's type information) */
+export type WithId<T> = T & { _id: string | ObjectId };
 
 // ============================================================================
 // Filter Types
@@ -121,12 +132,16 @@ export interface ElementOperators {
   $type?: string | number;
 }
 
-/** Array operators */
-export interface ArrayOperators<T> {
-  $all?: T[];
-  $elemMatch?: Filter<T extends (infer U)[] ? U : never>;
-  $size?: number;
-}
+/** Array operators - T is the field type (which may be an array) */
+export type ArrayOperators<T> = T extends (infer U)[]
+  ? {
+      /** Match all elements - expects array of element type */
+      $all?: U[];
+      /** Match element within array - filter on element type */
+      $elemMatch?: U extends Document ? Filter<U> : Record<string, unknown>;
+      $size?: number;
+    }
+  : never;
 
 /** Filter condition for a field */
 export type FilterCondition<T> =
@@ -135,8 +150,8 @@ export type FilterCondition<T> =
   | ElementOperators
   | ArrayOperators<T>;
 
-/** Logical operators */
-export interface LogicalOperators<T> {
+/** Logical operators - T must extend Document for Filter<T> compatibility */
+export interface LogicalOperators<T extends Document> {
   $and?: Filter<T>[];
   $or?: Filter<T>[];
   $nor?: Filter<T>[];
@@ -278,6 +293,12 @@ export interface FindOptions {
   skip?: number;
   hint?: string | { [key: string]: 1 | -1 };
   maxTimeMS?: number;
+  /**
+   * If true, skip corrupted Parquet files instead of failing.
+   * Warning: This may cause silent data loss. Use with caution.
+   * @default false
+   */
+  skipCorruptedFiles?: boolean;
 }
 
 /** Update options */
@@ -436,6 +457,7 @@ export interface MongoLakeConfig {
 /** R2Bucket type (from Cloudflare Workers) */
 export interface R2Bucket {
   get(key: string): Promise<R2ObjectBody | null>;
+  head(key: string): Promise<R2Object | null>;
   put(key: string, value: ArrayBuffer | Uint8Array | string): Promise<R2Object>;
   delete(key: string): Promise<void>;
   list(options?: R2ListOptions): Promise<R2Objects>;
