@@ -104,7 +104,7 @@
   },
   "homepage": "https://mongolake.com",
   "dependencies": {
-    "@dotdo/iceberg": "file:../iceberg/core",
+    "@dotdo/iceberg": "^0.1.0",
     "hyparquet": "^1.7.2",
     "hyparquet-writer": "^0.3.0",
     "oauth.do": "^0.2.0",
