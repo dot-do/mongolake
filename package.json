@@ -23,10 +23,43 @@
     "./parquet": {
       "types": "./dist/parquet/index.d.ts",
       "import": "./dist/parquet/index.js"
+    },
+    "./mongoose": {
+      "types": "./dist/mongoose/index.d.ts",
+      "import": "./dist/mongoose/index.js"
+    },
+    "./utils": {
+      "types": "./dist/utils/index.d.ts",
+      "import": "./dist/utils/index.js"
+    },
+    "./wire-protocol": {
+      "types": "./dist/wire-protocol/index.d.ts",
+      "import": "./dist/wire-protocol/index.js"
+    },
+    "./index": {
+      "types": "./dist/index/index.d.ts",
+      "import": "./dist/index/index.js"
+    },
+    "./storage/s3": {
+      "types": "./dist/storage/s3/index.d.ts",
+      "import": "./dist/storage/s3/index.js"
+    },
+    "./metrics": {
+      "types": "./dist/metrics/index.d.ts",
+      "import": "./dist/metrics/index.js"
+    },
+    "./transaction": {
+      "types": "./dist/transaction/index.d.ts",
+      "import": "./dist/transaction/index.js"
+    },
+    "./session": {
+      "types": "./dist/session/index.d.ts",
+      "import": "./dist/session/index.js"
     }
   },
   "bin": {
-    "mongolake": "./dist/cli/index.js"
+    "mongolake": "./dist/cli/index.js",
+    "mongolake-server": "./dist/wire-protocol/tcp-server.js"
   },
   "files": [
     "dist",
@@ -36,10 +69,21 @@
     "build": "tsc",
     "build:cli": "bun build src/cli/index.ts --compile --outfile dist/mongolake",
     "dev": "tsc --watch",
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "start": "node dist/wire-protocol/tcp-server.js",
+    "start:dev": "tsx src/wire-protocol/tcp-server.ts",
+    "test": "pnpm test:unit && pnpm test:integration",
+    "test:unit": "vitest run --config vitest.unit.config.ts",
+    "test:integration": "vitest run --config vitest.config.ts",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "test:watch": "vitest --config vitest.unit.config.ts",
+    "test:coverage": "vitest run --config vitest.unit.config.ts --coverage",
     "lint": "eslint src",
-    "prepublishOnly": "npm run build"
+    "benchmark": "npx tsx tests/benchmark/run-all.ts",
+    "benchmark:insert": "npx tsx tests/benchmark/insert-benchmark.ts",
+    "benchmark:find": "npx tsx tests/benchmark/find-benchmark.ts",
+    "benchmark:parquet": "npx tsx tests/benchmark/parquet-benchmark.ts",
+    "benchmark:index": "npx tsx tests/benchmark/index-benchmark.ts",
+    "prepublishOnly": "pnpm run build"
   },
   "keywords": [
     "mongodb",
@@ -60,16 +104,23 @@
   },
   "homepage": "https://mongolake.com",
   "dependencies": {
+    "@dotdo/iceberg": "file:../iceberg/core",
+    "hyparquet": "^1.7.2",
+    "hyparquet-writer": "^0.3.0",
     "oauth.do": "^0.2.0",
-    "rpc.do": "^0.2.0",
-    "@dotdo/cli": "^0.1.0"
+    "rpc.do": "^0.2.0"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.12.8",
     "@cloudflare/workers-types": "^4.20240117.0",
     "@types/node": "^20.10.0",
+    "@vitest/runner": "^3.2.4",
+    "@vitest/snapshot": "^3.2.4",
+    "miniflare": "^4.20260128.0",
     "mongodb": "^6.3.0",
+    "tsx": "^4.21.0",
     "typescript": "^5.3.0",
-    "vitest": "^1.2.0",
+    "vitest": "^3.2.4",
     "wrangler": "^3.22.0"
   },
   "peerDependencies": {
@@ -82,5 +133,6 @@
   },
   "engines": {
     "node": ">=18.0.0"
-  }
+  },
+  "packageManager": "pnpm@9.0.0"
 }
