@@ -27,6 +27,17 @@ Thumbs.db
 # Test coverage
 coverage/
 
+# Test artifacts
+.mongolake-test/
+.test-mongolake/
+
+# Mutation testing
+reports/
+.stryker-tmp/
+
+# Test results (JUnit XML reports)
+test-results/
+
 # Logs
 *.log
 npm-debug.log*

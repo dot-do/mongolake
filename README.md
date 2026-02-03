@@ -4,6 +4,7 @@
 
 [![npm version](https://badge.fury.io/js/mongolake.svg)](https://www.npmjs.com/package/mongolake)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![codecov](https://codecov.io/gh/dot-do/mongolake/graph/badge.svg)](https://codecov.io/gh/dot-do/mongolake)
 
 ```bash
 npm install mongolake
@@ -21,15 +22,29 @@ MongoLake is a MongoDB-compatible database that stores data as Parquet files. It
 - **Variant encoding** - Automatic handling of flexible document schemas
 - **Multiple storage backends** - Local filesystem, Cloudflare R2, S3-compatible storage
 
-**Coming Soon:**
-- Wire Protocol (MongoDB server compatibility)
-- Branching and merging
-- Time travel queries
-- Full Iceberg integration
+**New in this release:**
+- Wire Protocol server (mongosh, Compass compatibility)
+- CLI dev command for local development
+- B-tree indexing with automatic _id index
+- Enhanced aggregation pipeline ($unwind, $lookup)
+- Change streams with real-time watch() support
+- Iceberg metadata generation
 
 ## Quick Start
 
 ### Local Development
+
+Start a local development server with the CLI:
+
+```bash
+npx mongolake dev
+```
+
+This starts a server with:
+- MongoDB wire protocol on port 27017 (use with mongosh)
+- REST API on port 3000
+
+Or use the programmatic API:
 
 ```typescript
 import { db } from 'mongolake';
@@ -143,9 +158,24 @@ const historical = db('myapp', { asOf: '2024-01-15T00:00:00Z' });
 const oldData = await historical.collection('users').find({});
 ```
 
-### Wire Protocol (Coming Soon)
+### Wire Protocol
 
-MongoDB wire protocol compatibility (mongosh, Compass) is planned but not yet implemented.
+Connect with mongosh or MongoDB Compass:
+
+```bash
+# Start the server
+npx mongolake dev
+
+# In another terminal
+mongosh mongodb://localhost:27017/myapp
+```
+
+```javascript
+// In mongosh
+db.users.insertOne({ name: 'Alice', email: 'alice@example.com' })
+db.users.find({ name: 'Alice' })
+db.users.aggregate([{ $match: { status: 'active' } }])
+```
 
 ## Architecture
 
@@ -222,27 +252,28 @@ const lake = new MongoLake({
 
 ### Implemented (✅)
 
-- **Client API** - Full MongoDB-compatible CRUD operations
-  - `insertOne`, `insertMany`, `findOne`, `find`, `updateOne`, `updateMany`, `deleteOne`, `deleteMany`
-- **Parquet I/O** - Read/write Parquet files with hyparquet and hyparquet-writer
-- **Variant encoding** - Automatic handling of schema-less fields as Parquet variant type
-- **Storage backends** - Local filesystem, Cloudflare R2, S3-compatible endpoints
-- **Worker & Durable Object** - Cloudflare Workers deployment with RPC interface
+- **Client API** - Full CRUD operations (`insertOne`, `insertMany`, `findOne`, `find`, `updateOne`, `updateMany`, `deleteOne`, `deleteMany`)
+- **Parquet I/O** - Read/write with hyparquet
+- **Variant encoding** - Schema-less fields as Parquet variant
+- **Storage backends** - Local, R2, S3 (optional), Memory
+- **Worker & Durable Object** - Cloudflare deployment
+- **Wire Protocol Server** - TCP server compatible with mongosh
+- **CLI dev command** - Local development server with REST API
+- **B-tree Indexing** - Automatic _id index, range queries
+- **Aggregation Pipeline** - `$match`, `$group`, `$project`, `$sort`, `$limit`, `$skip`, `$unwind`, `$lookup`
+- **Change Streams** - Real-time `watch()` support
+- **Iceberg Metadata** - Manifest generation in Avro format
 
 ### Partial Implementation (🚧)
 
-- **Aggregation pipeline** - Basic stages: `$match`, `$group`, `$project`, `$sort`, `$limit`, `$skip`
-- **Filter operators** - `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$exists`, `$regex`, `$not`
-- **Update operators** - `$set`, basic field updates (other operators incomplete)
+- **Filter operators** - Most comparison/logical operators (`$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$exists`, `$regex`, `$not`)
+- **Update operators** - `$set`, `$unset`, `$inc` (basic)
 
 ### Not Yet Implemented (❌)
 
-- **CLI tooling** - `mongolake dev`, `shell`, `push`, `pull`, `branch`, `merge` commands
-- **Wire Protocol server** - TCP MongoDB protocol proxy (mongosh, Compass compatibility)
-- **Indexes** - Index creation and query optimization
-- **Iceberg integration** - Full Iceberg metadata management
-- **Branching & merging** - Database versioning with Git-like workflows
-- **Time travel** - Point-in-time snapshot queries
+- **Branching & merging** - Git-like database versioning
+- **Time travel** - Point-in-time queries
+- **Full Iceberg catalog integration**
 
 ## Deploy to Cloudflare Workers
 

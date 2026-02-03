@@ -6,6 +6,17 @@
     "lib": ["ES2022"],
     "outDir": "./dist",
     "rootDir": "./src",
+    "baseUrl": ".",
+    "paths": {
+      "@mongolake/*": ["./src/*"],
+      "@utils/*": ["./src/utils/*"],
+      "@types": ["./src/types"],
+      "@errors/*": ["./src/errors/*"],
+      "@client/*": ["./src/client/*"],
+      "@parquet/*": ["./src/parquet/*"],
+      "@storage/*": ["./src/storage/*"],
+      "@config/*": ["./src/config/*"]
+    },
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
@@ -16,13 +27,14 @@
     "noUnusedParameters": true,
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
-    "types": ["node"]
+    "types": ["node", "@cloudflare/workers-types"]
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist", "**/*.test.ts"]

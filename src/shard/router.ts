@@ -11,12 +11,16 @@
  * - Database-prefixed routing
  */
 
+import { DEFAULT_SHARD_COUNT } from '../constants.js';
+import { MongoLakeError, ErrorCodes } from '../errors/index.js';
+import { LRUCache } from '../utils/lru-cache.js';
+
 // ============================================================================
 // Types
 // ============================================================================
 
 export interface ShardRouterOptions {
-  /** Number of shards (must be power of 2, default: 16) */
+  /** Number of shards (must be power of 2, default: DEFAULT_SHARD_COUNT) */
   shardCount?: number;
   /** Maximum cache size (default: unlimited) */
   cacheSize?: number;
@@ -88,15 +92,19 @@ function murmurHashLite(input: string): number {
 /**
  * Hash a collection name to a shard ID
  * @param collectionName The collection name to hash
- * @param shardCount Number of shards (default: 16)
+ * @param shardCount Number of shards (default: DEFAULT_SHARD_COUNT)
  * @returns Shard ID in range [0, shardCount)
  */
 export function hashCollectionToShard(
   collectionName: string,
-  shardCount: number = 16
+  shardCount: number = DEFAULT_SHARD_COUNT
 ): number {
   if (!collectionName || collectionName.trim().length === 0) {
-    throw new Error('Cannot hash empty collection name');
+    throw new MongoLakeError(
+      'Cannot hash empty collection name',
+      ErrorCodes.INVALID_INPUT,
+      { field: 'collectionName' }
+    );
   }
   return murmurHashLite(collectionName) % shardCount;
 }
@@ -104,15 +112,19 @@ export function hashCollectionToShard(
 /**
  * Hash a document _id to a shard ID
  * @param documentId The document ID to hash
- * @param shardCount Number of shards (default: 16)
+ * @param shardCount Number of shards (default: DEFAULT_SHARD_COUNT)
  * @returns Shard ID in range [0, shardCount)
  */
 export function hashDocumentToShard(
   documentId: string,
-  shardCount: number = 16
+  shardCount: number = DEFAULT_SHARD_COUNT
 ): number {
   if (!documentId || documentId.length === 0) {
-    throw new Error('Cannot hash empty document id');
+    throw new MongoLakeError(
+      'Cannot hash empty document id',
+      ErrorCodes.INVALID_INPUT,
+      { field: 'documentId' }
+    );
   }
   return murmurHashLite(documentId) % shardCount;
 }
@@ -130,8 +142,8 @@ export class ShardRouter {
   private readonly cacheSize: number;
   private readonly hashFunction: (input: string) => number;
 
-  // LRU cache using Map (insertion order is maintained for FIFO eviction)
-  private readonly cache: Map<string, ShardAssignment>;
+  // LRU cache for shard assignments
+  private readonly cache: LRUCache<string, ShardAssignment>;
 
   // Affinity hints: collection/namespace -> preferred shard ID
   private readonly affinityHints: Map<string, number>;
@@ -143,18 +155,20 @@ export class ShardRouter {
   private stats: RouterStats;
 
   constructor(options: ShardRouterOptions = {}) {
-    this.shardCount = options.shardCount ?? 16;
-    this.cacheSize = options.cacheSize ?? Infinity;
+    this.shardCount = options.shardCount ?? DEFAULT_SHARD_COUNT;
+    this.cacheSize = options.cacheSize ?? 10000; // Default to 10K entries
     this.hashFunction = options.hashFunction ?? murmurHashLite;
 
     // Validate shard count is power of 2 for consistent bitwise operations
     if (!this.isPowerOfTwo(this.shardCount)) {
-      throw new Error(
-        `Shard count must be a power of 2, got: ${this.shardCount}`
+      throw new MongoLakeError(
+        `Shard count must be a power of 2, got: ${this.shardCount}`,
+        ErrorCodes.INVALID_INPUT,
+        { field: 'shardCount', value: this.shardCount }
       );
     }
 
-    this.cache = new Map();
+    this.cache = new LRUCache({ maxSize: this.cacheSize });
     this.affinityHints = new Map();
     this.splits = new Map();
     this.stats = { cacheHits: 0, cacheMisses: 0, totalRoutes: 0 };
@@ -176,24 +190,16 @@ export class ShardRouter {
   }
 
   /**
-   * Evict oldest (first) entry from cache if at capacity using LRU
-   */
-  private evictOldestIfFull(): void {
-    if (this.cache.size >= this.cacheSize) {
-      const oldestKey = this.cache.keys().next().value;
-      if (oldestKey) {
-        this.cache.delete(oldestKey);
-      }
-    }
-  }
-
-  /**
    * Route a collection to a shard using consistent hashing
    * Returns cached result if available
    */
   route(collection: string): ShardAssignment {
     if (!collection || collection.trim().length === 0) {
-      throw new Error('Cannot route empty collection name');
+      throw new MongoLakeError(
+        'Cannot route empty collection name',
+        ErrorCodes.INVALID_INPUT,
+        { field: 'collection' }
+      );
     }
 
     this.stats.totalRoutes++;
@@ -214,8 +220,7 @@ export class ShardRouter {
 
     const assignment: ShardAssignment = { shardId, collection };
 
-    // Cache result for future lookups
-    this.evictOldestIfFull();
+    // Cache result for future lookups (LRU cache handles eviction automatically)
     this.cache.set(collection, assignment);
 
     return assignment;
@@ -227,10 +232,18 @@ export class ShardRouter {
    */
   routeWithDatabase(database: string, collection: string): ShardAssignment {
     if (!database || database.trim().length === 0) {
-      throw new Error('Cannot route with empty database name');
+      throw new MongoLakeError(
+        'Cannot route with empty database name',
+        ErrorCodes.INVALID_INPUT,
+        { field: 'database' }
+      );
     }
     if (!collection || collection.trim().length === 0) {
-      throw new Error('Cannot route empty collection name');
+      throw new MongoLakeError(
+        'Cannot route empty collection name',
+        ErrorCodes.INVALID_INPUT,
+        { field: 'collection' }
+      );
     }
 
     this.stats.totalRoutes++;
@@ -254,8 +267,7 @@ export class ShardRouter {
 
     const assignment: ShardAssignment = { shardId, collection, database };
 
-    // Cache result for future lookups
-    this.evictOldestIfFull();
+    // Cache result for future lookups (LRU cache handles eviction automatically)
     this.cache.set(namespace, assignment);
 
     return assignment;
@@ -268,10 +280,18 @@ export class ShardRouter {
    */
   routeDocument(collection: string, documentId: string): ShardAssignment {
     if (!collection || collection.trim().length === 0) {
-      throw new Error('Cannot route empty collection name');
+      throw new MongoLakeError(
+        'Cannot route empty collection name',
+        ErrorCodes.INVALID_INPUT,
+        { field: 'collection' }
+      );
     }
     if (!documentId || documentId.length === 0) {
-      throw new Error('Cannot route empty document id');
+      throw new MongoLakeError(
+        'Cannot route empty document id',
+        ErrorCodes.INVALID_INPUT,
+        { field: 'documentId' }
+      );
     }
 
     this.stats.totalRoutes++;
@@ -282,7 +302,7 @@ export class ShardRouter {
       const hash = this.hashFunction(documentId);
       const shardIndex = hash % splitShards.length;
       return {
-        shardId: splitShards[shardIndex],
+        shardId: splitShards[shardIndex]!,
         collection,
         documentId,
       };
@@ -321,8 +341,10 @@ export class ShardRouter {
   setAffinityHint(collection: string, hint: { preferredShard: number }): void {
     const shardId = hint.preferredShard;
     if (shardId < 0 || shardId >= this.shardCount) {
-      throw new Error(
-        `Shard ID out of range: ${shardId}. Must be between 0 and ${this.shardCount - 1}`
+      throw new MongoLakeError(
+        `Shard ID out of range: ${shardId}. Must be between 0 and ${this.shardCount - 1}`,
+        ErrorCodes.INVALID_INPUT,
+        { field: 'preferredShard', value: shardId, min: 0, max: this.shardCount - 1 }
       );
     }
     this.affinityHints.set(collection, shardId);
@@ -357,14 +379,20 @@ export class ShardRouter {
    */
   splitCollection(collection: string, shards: number[]): void {
     if (shards.length < 2) {
-      throw new Error('Split requires at least 2 shards');
+      throw new MongoLakeError(
+        'Split requires at least 2 shards',
+        ErrorCodes.INVALID_INPUT,
+        { field: 'shards', value: shards.length, minRequired: 2 }
+      );
     }
 
     // Validate all shard IDs are in valid range
     for (const shardId of shards) {
       if (shardId < 0 || shardId >= this.shardCount) {
-        throw new Error(
-          `Shard ID out of range: ${shardId}. Must be between 0 and ${this.shardCount - 1}`
+        throw new MongoLakeError(
+          `Shard ID out of range: ${shardId}. Must be between 0 and ${this.shardCount - 1}`,
+          ErrorCodes.INVALID_INPUT,
+          { field: 'shardId', value: shardId, min: 0, max: this.shardCount - 1 }
         );
       }
     }

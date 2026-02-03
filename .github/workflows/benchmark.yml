@@ -1,0 +1,53 @@
+name: Benchmarks
+
+on:
+  # Run on schedule (weekly on Sundays at midnight UTC)
+  schedule:
+    - cron: '0 0 * * 0'
+  # Allow manual triggering
+  workflow_dispatch:
+  # Run on pushes to main for benchmark tracking
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/benchmark/**'
+      - 'vitest.bench.config.ts'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    name: Run Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run vitest benchmarks
+        run: pnpm benchmark:vitest
+        continue-on-error: true
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ github.sha }}
+          path: benchmark-results.json
+          retention-days: 30
+          if-no-files-found: warn

@@ -116,7 +116,7 @@ describe('MongoLake Shard Router', () => {
     })
 
     it('should handle empty collection name', () => {
-      expect(() => hashCollectionToShard('')).toThrow(/collection.*empty|empty.*collection/i)
+      expect(() => hashCollectionToShard('')).toThrow(/cannot.*empty/i)
     })
 
     it('should handle very long collection names', () => {
@@ -200,7 +200,7 @@ describe('MongoLake Shard Router', () => {
       })
 
       it('should return cached assignment without recomputing', () => {
-        // Spy on the internal hash function
+        // Spy on the internal hash function (private method)
         const hashSpy = vi.spyOn(router as any, 'computeHash')
 
         router.route('orders')
@@ -377,7 +377,7 @@ describe('MongoLake Shard Router', () => {
       })
 
       it('should reject empty database name', () => {
-        expect(() => router.routeWithDatabase('', 'users')).toThrow(/empty.*database/i)
+        expect(() => router.routeWithDatabase('', 'users')).toThrow(/cannot.*empty/i)
       })
 
     })
@@ -469,7 +469,7 @@ describe('MongoLake Shard Router', () => {
       })
 
       it('should reject empty document _id', () => {
-        expect(() => hashDocumentToShard('')).toThrow(/empty.*id/i)
+        expect(() => hashDocumentToShard('')).toThrow(/cannot.*empty/i)
       })
 
     })
@@ -624,8 +624,8 @@ describe('MongoLake Shard Router', () => {
     describe('edge cases', () => {
 
       it('should handle whitespace-only collection names', () => {
-        expect(() => router.route('   ')).toThrow(/empty.*collection/i)
-        expect(() => router.route('\t\n')).toThrow(/empty.*collection/i)
+        expect(() => router.route('   ')).toThrow(/cannot.*empty/i)
+        expect(() => router.route('\t\n')).toThrow(/cannot.*empty/i)
       })
 
       it('should handle null bytes in collection name', () => {

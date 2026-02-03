@@ -1,0 +1,71 @@
+name = "mongolake"
+main = "src/index.ts"
+compatibility_date = "2024-09-02"
+# Note: Using date before 2025-09-21 to avoid vitest compatibility issues
+# See: https://github.com/cloudflare/workers-sdk/issues/11028
+compatibility_flags = ["nodejs_compat_v2"]
+
+# Durable Objects
+[durable_objects]
+bindings = [
+  { name = "RPC_NAMESPACE", class_name = "ShardDO" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ShardDO"]
+
+# R2 Storage
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "mongolake-data"
+
+# Environment variables
+[vars]
+ENVIRONMENT = "development"
+
+# Development environment
+[env.development]
+vars = { ENVIRONMENT = "development" }
+
+# Test environment (used by vitest-pool-workers)
+[env.test]
+vars = { ENVIRONMENT = "test" }
+
+# Production environment
+[env.production]
+vars = { ENVIRONMENT = "production" }
+
+# ============================================================================
+# Service Bindings for OAuth Authentication
+# ============================================================================
+# These bindings enable low-latency authentication by using
+# in-datacenter communication instead of external HTTP calls.
+#
+# The AUTH service handles token validation.
+# The OAUTH service handles token refresh and exchange.
+#
+# To enable, uncomment the sections below and deploy the auth/oauth services.
+# ============================================================================
+
+# Uncomment to enable in all environments:
+# [[services]]
+# binding = "AUTH"
+# service = "auth-service"
+
+# [[services]]
+# binding = "OAUTH"
+# service = "oauth-service"
+
+# ============================================================================
+# Production-only Service Bindings
+# ============================================================================
+# Alternatively, enable service bindings only in production:
+
+# [[env.production.services]]
+# binding = "AUTH"
+# service = "auth-service"
+
+# [[env.production.services]]
+# binding = "OAUTH"
+# service = "oauth-service"

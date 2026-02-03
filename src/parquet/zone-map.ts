@@ -96,11 +96,14 @@ export interface SerializeOptions {
 // Zone Map Generator Implementation
 // ============================================================================
 
+import { LRUCache } from '../utils/lru-cache.js';
+
 /**
  * Generator for creating and managing zone maps
  */
 export class ZoneMapGenerator {
-  private zoneMaps: Map<string, ZoneMap> = new Map();
+  /** Zone map cache with LRU eviction (max 1000 fields per generator) */
+  private zoneMaps: LRUCache<string, ZoneMap> = new LRUCache({ maxSize: 1000 });
 
   /**
    * Process a row group and update the zone map for a specific field.
@@ -172,7 +175,7 @@ export class ZoneMapGenerator {
    */
   getMetadata(): ZoneMapMetadata {
     const columns: { [fieldPath: string]: ZoneMap } = {};
-    for (const [fieldPath, zoneMap] of this.zoneMaps) {
+    for (const [fieldPath, zoneMap] of this.zoneMaps.entries()) {
       columns[fieldPath] = zoneMap;
     }
     return { columns };
@@ -194,7 +197,7 @@ export class ZoneMapGenerator {
     let current: unknown = row;
 
     for (let i = 0; i < pathParts.length; i++) {
-      const part = pathParts[i];
+      const part = pathParts[i]!;
 
       // Stop traversal if we hit null/undefined
       if (current === null || current === undefined) {
@@ -399,8 +402,12 @@ export class ZoneMapGenerator {
 
     // Case 1: Only bigints - use bigint comparison (no precision loss)
     if (bigints.length > 0 && numbers.length === 0) {
-      let min = bigints[0];
-      let max = bigints[0];
+      const firstBigint = bigints[0];
+      if (firstBigint === undefined) {
+        throw new Error('Expected at least one bigint value');
+      }
+      let min = firstBigint;
+      let max = firstBigint;
       for (const v of bigints) {
         if (v < min) min = v;
         if (v > max) max = v;
@@ -410,8 +417,12 @@ export class ZoneMapGenerator {
 
     // Case 2: Only numbers - use numeric comparison
     if (numbers.length > 0 && bigints.length === 0) {
-      let min = numbers[0];
-      let max = numbers[0];
+      const firstNumber = numbers[0];
+      if (firstNumber === undefined) {
+        throw new Error('Expected at least one number value');
+      }
+      let min = firstNumber;
+      let max = firstNumber;
       for (const v of numbers) {
         if (v < min) min = v;
         if (v > max) max = v;
@@ -421,8 +432,12 @@ export class ZoneMapGenerator {
 
     // Case 3: Mixed number and bigint - convert to number for comparison
     // NOTE: Large bigints lose precision when converted to number
-    let min = values[0];
-    let max = values[0];
+    const firstValue = values[0];
+    if (firstValue === undefined) {
+      throw new Error('Expected at least one numeric value');
+    }
+    let min = firstValue;
+    let max = firstValue;
     for (const v of values) {
       const vNum = typeof v === 'bigint' ? Number(v) : v;
       const minNum = typeof min === 'bigint' ? Number(min) : min;
@@ -437,8 +452,12 @@ export class ZoneMapGenerator {
    * Find min/max for string values using lexicographic comparison.
    */
   private findStringMinMax(values: string[]): { min: string; max: string } {
-    let min = values[0];
-    let max = values[0];
+    const firstValue = values[0];
+    if (firstValue === undefined) {
+      throw new Error('Expected at least one string value');
+    }
+    let min = firstValue;
+    let max = firstValue;
     for (const v of values) {
       if (v < min) min = v;
       if (v > max) max = v;
@@ -450,8 +469,12 @@ export class ZoneMapGenerator {
    * Find min/max for date values using timestamp comparison.
    */
   private findDateMinMax(values: Date[]): { min: Date; max: Date } {
-    let min = values[0];
-    let max = values[0];
+    const firstValue = values[0];
+    if (firstValue === undefined) {
+      throw new Error('Expected at least one date value');
+    }
+    let min = firstValue;
+    let max = firstValue;
     for (const v of values) {
       if (v.getTime() < min.getTime()) min = v;
       if (v.getTime() > max.getTime()) max = v;
@@ -565,8 +588,21 @@ function mergeEntries(entries: ZoneMapEntry[], fieldType: ZoneMapFieldType): Zon
   }
 
   // Compute overall bounds by finding global min/max across all entries
-  let min: ZoneMapValue = nonNullEntries[0].min;
-  let max: ZoneMapValue = nonNullEntries[0].max;
+  const firstEntry = nonNullEntries[0];
+  if (!firstEntry) {
+    // This shouldn't happen since we checked nonNullEntries.length above
+    return {
+      rowGroupId: 'merged',
+      min: null,
+      max: null,
+      nullCount: totalNullCount,
+      hasNull: true,
+      allNull: true,
+      rowCount: totalRowCount,
+    };
+  }
+  let min: ZoneMapValue = firstEntry.min;
+  let max: ZoneMapValue = firstEntry.max;
 
   for (const entry of nonNullEntries) {
     // Update min if we find a smaller value
@@ -594,12 +630,41 @@ function mergeEntries(entries: ZoneMapEntry[], fieldType: ZoneMapFieldType): Zon
  * Compare two values in a type-aware manner.
  * Returns: < 0 if a < b, 0 if a == b, > 0 if a > b
  * Handles null values (treated as less than any non-null value).
+ * Supports type coercion between compatible types:
+ * - number <-> bigint (both converted to number for comparison)
+ * - Date <-> ISO string (string parsed as Date)
+ * - Date <-> timestamp number (number treated as milliseconds since epoch)
  */
 function compareValues(a: ZoneMapValue, b: ZoneMapValue, fieldType: ZoneMapFieldType): number {
   // Null handling: null is treated as less than any non-null value
   if (a === null && b === null) return 0;
   if (a === null) return -1;
   if (b === null) return 1;
+
+  // Type coercion for number/bigint comparisons
+  const aIsNumeric = typeof a === 'number' || typeof a === 'bigint';
+  const bIsNumeric = typeof b === 'number' || typeof b === 'bigint';
+  if (aIsNumeric && bIsNumeric) {
+    // Convert both to number for comparison (may lose precision for very large bigints)
+    const aNum = typeof a === 'bigint' ? Number(a) : (a as number);
+    const bNum = typeof b === 'bigint' ? Number(b) : (b as number);
+    return aNum - bNum;
+  }
+
+  // Type coercion for date comparisons
+  // Handles: Date <-> Date, Date <-> ISO string, Date <-> timestamp number
+  const aIsDate = a instanceof Date;
+  const bIsDate = b instanceof Date;
+  const aIsDateLike = aIsDate || (fieldType === 'date' && (typeof a === 'string' || typeof a === 'number'));
+  const bIsDateLike = bIsDate || (fieldType === 'date' && (typeof b === 'string' || typeof b === 'number'));
+
+  if (aIsDate || bIsDate || (aIsDateLike && bIsDateLike)) {
+    const aTime = coerceToTimestamp(a);
+    const bTime = coerceToTimestamp(b);
+    if (aTime !== null && bTime !== null) {
+      return aTime - bTime;
+    }
+  }
 
   // Type-specific comparisons using field type hint or runtime type detection
   if (fieldType === 'date' || (a instanceof Date && b instanceof Date)) {
@@ -621,6 +686,29 @@ function compareValues(a: ZoneMapValue, b: ZoneMapValue, fieldType: ZoneMapField
 
   // Fallback: lexicographic comparison on string representations
   return String(a) < String(b) ? -1 : String(a) > String(b) ? 1 : 0;
+}
+
+/**
+ * Coerce a value to a timestamp (milliseconds since epoch).
+ * Supports: Date objects, ISO date strings, and numeric timestamps.
+ * Returns null if the value cannot be coerced to a valid timestamp.
+ */
+function coerceToTimestamp(value: ZoneMapValue): number | null {
+  if (value instanceof Date) {
+    return value.getTime();
+  }
+  if (typeof value === 'number') {
+    // Assume numeric value is already a timestamp in milliseconds
+    return value;
+  }
+  if (typeof value === 'string') {
+    // Try to parse as ISO date string
+    const parsed = Date.parse(value);
+    if (!Number.isNaN(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
 }
 
 // ============================================================================
@@ -654,10 +742,24 @@ export function evaluatePredicate(
   const { min, max } = entry;
   const { op, value } = predicate;
 
+  // Special handling for null predicate values
+  if (value === null) {
+    if (op === '$eq') {
+      // $eq: null matches if the row group contains null values
+      return entry.hasNull ? 'MATCH' : 'NO_MATCH';
+    }
+    if (op === '$ne') {
+      // $ne: null matches if the row group contains non-null values
+      return entry.allNull ? 'NO_MATCH' : 'MATCH';
+    }
+    // For other operators with null value, we can't determine from zone map
+    return 'UNKNOWN';
+  }
+
   // Dispatch to operator-specific evaluator
   switch (op) {
     case '$eq':
-      return evaluateEq(min, max, value as ZoneMapValue, zoneMap.fieldType);
+      return evaluateEq(min, max, value as ZoneMapValue, zoneMap.fieldType, entry.hasNull);
     case '$ne':
       return evaluateNe(min, max, value as ZoneMapValue, zoneMap.fieldType);
     case '$gt':
@@ -684,7 +786,8 @@ function evaluateEq(
   min: ZoneMapValue,
   max: ZoneMapValue,
   value: ZoneMapValue,
-  fieldType: ZoneMapFieldType
+  fieldType: ZoneMapFieldType,
+  _hasNull?: boolean
 ): PredicateResult {
   // Predicate $eq: value may exist if it falls within [min, max]
   const gtMin = compareValues(value, min, fieldType) >= 0;
@@ -765,6 +868,116 @@ function evaluateIn(
     }
   }
   return 'NO_MATCH';
+}
+
+// ============================================================================
+// Row Group Filtering
+// ============================================================================
+
+/**
+ * Filter row groups based on a predicate.
+ * Returns an array of row group IDs that potentially match the predicate.
+ * Row groups that definitely don't match are excluded.
+ */
+export function filterRowGroups(
+  zoneMap: ZoneMap,
+  predicate: RangePredicate
+): string[] {
+  const matchingGroups: string[] = [];
+
+  for (const entry of zoneMap.entries) {
+    const result = evaluatePredicate(zoneMap, entry.rowGroupId, predicate);
+    // Include row groups that MATCH or are UNKNOWN (conservative approach)
+    if (result !== 'NO_MATCH') {
+      matchingGroups.push(entry.rowGroupId);
+    }
+  }
+
+  return matchingGroups;
+}
+
+// ============================================================================
+// Compound Predicate Evaluation
+// ============================================================================
+
+/**
+ * Compound predicate type supporting $and and $or operators.
+ * Allows nesting of range predicates and other compound predicates.
+ */
+export interface CompoundPredicate {
+  $and?: Array<RangePredicate | CompoundPredicate>;
+  $or?: Array<RangePredicate | CompoundPredicate>;
+}
+
+/**
+ * Type guard to check if a predicate is a RangePredicate
+ */
+function isRangePredicate(predicate: RangePredicate | CompoundPredicate): predicate is RangePredicate {
+  return 'op' in predicate && 'value' in predicate;
+}
+
+/**
+ * Evaluate a compound predicate ($and/$or) against a zone map entry.
+ * Supports nested compound predicates for complex filter expressions.
+ *
+ * Returns:
+ * - MATCH: Row group may contain matching data
+ * - NO_MATCH: Row group definitely doesn't contain matching data
+ * - UNKNOWN: Cannot determine from zone map statistics alone
+ */
+export function evaluateCompoundPredicate(
+  zoneMap: ZoneMap,
+  rowGroupId: string,
+  predicate: CompoundPredicate
+): PredicateResult {
+  // Handle $and predicates
+  if (predicate.$and && predicate.$and.length > 0) {
+    let hasUnknown = false;
+
+    for (const subPredicate of predicate.$and) {
+      const result = isRangePredicate(subPredicate)
+        ? evaluatePredicate(zoneMap, rowGroupId, subPredicate)
+        : evaluateCompoundPredicate(zoneMap, rowGroupId, subPredicate);
+
+      // For AND, if any predicate is NO_MATCH, the whole thing is NO_MATCH
+      if (result === 'NO_MATCH') {
+        return 'NO_MATCH';
+      }
+      if (result === 'UNKNOWN') {
+        hasUnknown = true;
+      }
+    }
+
+    // If we got here, no predicates were NO_MATCH
+    // Return UNKNOWN if any were unknown, otherwise MATCH
+    return hasUnknown ? 'UNKNOWN' : 'MATCH';
+  }
+
+  // Handle $or predicates
+  if (predicate.$or && predicate.$or.length > 0) {
+    let hasUnknown = false;
+
+    for (const subPredicate of predicate.$or) {
+      const result = isRangePredicate(subPredicate)
+        ? evaluatePredicate(zoneMap, rowGroupId, subPredicate)
+        : evaluateCompoundPredicate(zoneMap, rowGroupId, subPredicate);
+
+      // For OR, if any predicate is MATCH, the whole thing is MATCH
+      if (result === 'MATCH') {
+        return 'MATCH';
+      }
+      if (result === 'UNKNOWN') {
+        hasUnknown = true;
+      }
+    }
+
+    // If we got here, no predicates were MATCH
+    // Return UNKNOWN if any were unknown, otherwise NO_MATCH
+    return hasUnknown ? 'UNKNOWN' : 'NO_MATCH';
+  }
+
+  // Empty compound predicate - cannot determine
+  return 'UNKNOWN';
 }
 
 // ============================================================================
@@ -1042,7 +1255,7 @@ function deserializeZoneMapBinary(data: Uint8Array): ZoneMap {
     5: 'boolean',
     6: 'mixed',
   };
-  const fieldType = fieldTypeMap[data[offset]] || 'string';
+  const fieldType = fieldTypeMap[data[offset]!] || 'string';
   offset += 1;
 
   // Read entry count

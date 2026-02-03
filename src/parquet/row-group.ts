@@ -10,22 +10,31 @@
  */
 
 import {
+  PARQUET_MAGIC_BYTES,
   PARQUET_MAGIC_SIZE,
-  SNAPPY_WINDOW_SIZE,
-  SNAPPY_MIN_MATCH_LENGTH,
-  MAX_MATCH_LENGTH,
-  LITERAL_FLUSH_THRESHOLD,
-  ZSTD_WINDOW_SIZE,
-  ZSTD_MIN_MATCH_LENGTH,
-  HASH_POSITION_LIMIT,
 } from '../constants.js';
+
+import {
+  compress,
+  supportedCodecs,
+  type CompressionCodec,
+} from './compression.js';
+
+import type {
+  ParquetPhysicalType,
+  RepetitionType,
+  ColumnStatistics,
+} from './types.js';
+
+// Re-export compression types for backwards compatibility
+export type { CompressionCodec } from './compression.js';
+
+// Re-export types from types.ts for backwards compatibility
+export type { ParquetPhysicalType, RepetitionType, ColumnStatistics } from './types.js';
 
 // ============================================================================
 // Type Definitions
 // ============================================================================
-
-/** Supported compression codecs */
-export type CompressionCodec = 'none' | 'snappy' | 'zstd';
 
 /** Encoding type for columns */
 export type ColumnEncoding = 'PLAIN' | 'RLE' | 'DELTA_BINARY_PACKED' | 'DELTA_LENGTH_BYTE_ARRAY';
@@ -40,28 +49,6 @@ export type ColumnDataType =
   | 'binary'
   | 'variant';
 
-/** Parquet physical types */
-export type ParquetPhysicalType =
-  | 'BOOLEAN'
-  | 'INT32'
-  | 'INT64'
-  | 'INT96'
-  | 'FLOAT'
-  | 'DOUBLE'
-  | 'BYTE_ARRAY'
-  | 'FIXED_LEN_BYTE_ARRAY';
-
-/** Repetition types */
-export type RepetitionType = 'REQUIRED' | 'OPTIONAL' | 'REPEATED';
-
-/** Column statistics for zone maps */
-export interface ColumnStatistics {
-  minValue?: unknown;
-  maxValue?: unknown;
-  nullCount?: number;
-  distinctCount?: number;
-}
-
 /** Column chunk metadata */
 export interface ColumnChunk {
   columnName: string;
@@ -75,8 +62,8 @@ export interface ColumnChunk {
   statistics?: ColumnStatistics;
 }
 
-/** Schema element for metadata */
-export interface SchemaElement {
+/** Schema element for row group metadata */
+export interface RowGroupSchemaElement {
   name: string;
   type: ParquetPhysicalType;
   repetitionType: RepetitionType;
@@ -93,7 +80,7 @@ export interface RowGroupMetadata {
   numRows: number;
   totalByteSize: number;
   columns: ColumnMetadata[];
-  schema: SchemaElement[];
+  schema: RowGroupSchemaElement[];
   sortingColumns?: string[];
 }
 
@@ -127,213 +114,6 @@ interface ColumnData {
 }
 
 // ============================================================================
-// Simple Compression Implementations
-// ============================================================================
-
-/**
- * Encode original data length as 4-byte little-endian integer.
- * Used by both snappy and ZSTD compression for decompression.
- */
-function encodeOriginalLength(length: number): number[] {
-  return [
-    length & 0xff,
-    (length >> 8) & 0xff,
-    (length >> 16) & 0xff,
-    (length >> 24) & 0xff,
-  ];
-}
-
-/**
- * Flush accumulated literals to output buffer.
- * Encodes length with continuation bit if length exceeds 127.
- */
-function flushLiteralsToOutput(output: number[], literals: number[]): void {
-  if (literals.length === 0) return;
-
-  if (literals.length <= 127) {
-    output.push(literals.length);
-    output.push(...literals);
-  } else {
-    // Continuation bit indicates next byte contains additional length
-    output.push(0x80 | (literals.length & 0x7f));
-    output.push(literals.length >> 7);
-    output.push(...literals);
-  }
-  literals.length = 0;
-}
-
-/**
- * LZ77-style compression with sliding window for Snappy-like behavior.
- * Finds repeated sequences and encodes them as back-references.
- */
-function compressSnappy(data: Uint8Array): Uint8Array {
-  if (data.length === 0) return new Uint8Array(0);
-  if (data.length < 10) return data;
-
-  const output: number[] = [];
-  output.push(...encodeOriginalLength(data.length));
-
-  let pos = 0;
-  const literals: number[] = [];
-
-  while (pos < data.length) {
-    // Find the best match in the sliding window
-    let bestMatchLength = 0;
-    let bestMatchOffset = 0;
-
-    const windowStart = Math.max(0, pos - SNAPPY_WINDOW_SIZE);
-    for (let offset = windowStart; offset < pos; offset++) {
-      let matchLength = 0;
-      while (
-        pos + matchLength < data.length &&
-        matchLength < MAX_MATCH_LENGTH &&
-        data[offset + matchLength] === data[pos + matchLength]
-      ) {
-        matchLength++;
-      }
-      if (matchLength > bestMatchLength) {
-        bestMatchLength = matchLength;
-        bestMatchOffset = pos - offset;
-      }
-    }
-
-    if (bestMatchLength >= SNAPPY_MIN_MATCH_LENGTH) {
-      // Flush pending literals before encoding a match
-      flushLiteralsToOutput(output, literals);
-
-      // Encode match: marker (0xFF), offset (2 bytes), length (1 byte)
-      output.push(0xff);
-      output.push(bestMatchOffset & 0xff);
-      output.push((bestMatchOffset >> 8) & 0xff);
-      output.push(bestMatchLength);
-      pos += bestMatchLength;
-    } else {
-      literals.push(data[pos]);
-      pos++;
-
-      // Periodically flush large literal blocks to prevent unbounded growth
-      if (literals.length >= LITERAL_FLUSH_THRESHOLD) {
-        flushLiteralsToOutput(output, literals);
-      }
-    }
-  }
-
-  // Flush any remaining literals
-  flushLiteralsToOutput(output, literals);
-
-  const result = new Uint8Array(output);
-
-  // Return uncompressed if compression wasn't beneficial
-  if (result.length < data.length) {
-    return result;
-  }
-  return data;
-}
-
-/**
- * LZ77-style compression with larger window for ZSTD-like behavior.
- * Uses more aggressive matching via hash table for better compression ratios.
- */
-function compressZstd(data: Uint8Array): Uint8Array {
-  if (data.length === 0) return new Uint8Array(0);
-  if (data.length < 10) return data;
-
-  const output: number[] = [];
-  output.push(...encodeOriginalLength(data.length));
-
-  // Hash table maps 3-byte patterns to their positions for faster matching
-  const hashTable = new Map<number, number[]>();
-
-  const computeHash = (pos: number): number => {
-    if (pos + 3 > data.length) return 0;
-    return (data[pos] << 16) | (data[pos + 1] << 8) | data[pos + 2];
-  };
-
-  let pos = 0;
-  const literals: number[] = [];
-
-  while (pos < data.length) {
-    const currentHash = computeHash(pos);
-    const candidates = hashTable.get(currentHash) || [];
-
-    // Find the best match among candidates
-    let bestMatchLength = 0;
-    let bestMatchOffset = 0;
-
-    for (const candidatePos of candidates) {
-      // Skip candidates outside the window
-      if (pos - candidatePos > ZSTD_WINDOW_SIZE) continue;
-
-      let matchLength = 0;
-      while (
-        pos + matchLength < data.length &&
-        matchLength < MAX_MATCH_LENGTH &&
-        data[candidatePos + matchLength] === data[pos + matchLength]
-      ) {
-        matchLength++;
-      }
-      if (matchLength > bestMatchLength) {
-        bestMatchLength = matchLength;
-        bestMatchOffset = pos - candidatePos;
-      }
-    }
-
-    // Update hash table with current position
-    if (!hashTable.has(currentHash)) {
-      hashTable.set(currentHash, []);
-    }
-    const positionList = hashTable.get(currentHash)!;
-    positionList.push(pos);
-
-    // Keep only recent positions to limit memory usage
-    if (positionList.length > HASH_POSITION_LIMIT) {
-      positionList.shift();
-    }
-
-    if (bestMatchLength >= ZSTD_MIN_MATCH_LENGTH) {
-      flushLiteralsToOutput(output, literals);
-      output.push(0xff);
-      output.push(bestMatchOffset & 0xff);
-      output.push((bestMatchOffset >> 8) & 0xff);
-      output.push(bestMatchLength);
-      pos += bestMatchLength;
-    } else {
-      literals.push(data[pos]);
-      pos++;
-
-      // Periodically flush large literal blocks to prevent unbounded growth
-      if (literals.length >= LITERAL_FLUSH_THRESHOLD) {
-        flushLiteralsToOutput(output, literals);
-      }
-    }
-  }
-
-  flushLiteralsToOutput(output, literals);
-
-  const result = new Uint8Array(output);
-  if (result.length < data.length) {
-    return result;
-  }
-  return data;
-}
-
-/**
- * Compress data using the specified codec
- */
-function compress(data: Uint8Array, codec: CompressionCodec): Uint8Array {
-  switch (codec) {
-    case 'none':
-      return data;
-    case 'snappy':
-      return compressSnappy(data);
-    case 'zstd':
-      return compressZstd(data);
-    default:
-      throw new Error(`Unsupported compression codec: ${codec}`);
-  }
-}
-
-// ============================================================================
 // Row Group Serializer Implementation
 // ============================================================================
 
@@ -348,7 +128,6 @@ export class RowGroupSerializer {
     const codec = options?.compression ?? 'snappy';
 
     // Validate that the compression codec is supported
-    const supportedCodecs: CompressionCodec[] = ['none', 'snappy', 'zstd'];
     if (!supportedCodecs.includes(codec)) {
       throw new Error(`Unsupported compression codec '${codec}'. Must be one of: ${supportedCodecs.join(', ')}`);
     }
@@ -392,7 +171,8 @@ export class RowGroupSerializer {
    */
   private serializeEmpty(): SerializedRowGroup {
     // Create minimal Parquet header with PAR1 magic
-    const data = new Uint8Array([0x50, 0x41, 0x52, 0x31]); // PAR1
+    const encoder = new TextEncoder();
+    const data = encoder.encode(PARQUET_MAGIC_BYTES);
 
     return {
       rowCount: 0,
@@ -418,7 +198,7 @@ export class RowGroupSerializer {
     const validOps = ['i', 'u', 'd'];
 
     for (let i = 0; i < documents.length; i++) {
-      const document = documents[i];
+      const document = documents[i]!;
 
       // Check required system fields
       for (const field of requiredFields) {
@@ -637,22 +417,43 @@ export class RowGroupSerializer {
 
   /**
    * Encode all column values to binary format.
-   * Each value is individually encoded then concatenated into a single buffer.
+   * Format: [null bitmap] [non-null values only]
+   *
+   * The null bitmap has ceil(numValues / 8) bytes, where each bit indicates
+   * if the value at that position is present (1) or null (0).
+   * Only non-null values are encoded after the bitmap.
    */
   private encodeColumnValues(column: ColumnData): Uint8Array {
-    const encodedParts: Uint8Array[] = [];
+    const numValues = column.values.length;
+    const bitmapSize = Math.ceil(numValues / 8);
 
-    // Encode each value according to the column type
-    for (const value of column.values) {
-      encodedParts.push(this.encodeValue(value, column.type));
+    // Build null bitmap: bit i is set if value i is NOT null
+    const bitmap = new Uint8Array(bitmapSize);
+    for (let i = 0; i < numValues; i++) {
+      if (column.values[i] !== null && column.values[i] !== undefined) {
+        const byteIndex = Math.floor(i / 8);
+        const bitIndex = i % 8;
+        bitmap[byteIndex]! |= 1 << bitIndex;
+      }
     }
 
-    // Calculate total buffer size and allocate
-    const totalSize = encodedParts.reduce((sum, part) => sum + part.length, 0);
-    const buffer = new Uint8Array(totalSize);
+    // Encode only non-null values
+    const encodedParts: Uint8Array[] = [];
+    for (const value of column.values) {
+      if (value !== null && value !== undefined) {
+        encodedParts.push(this.encodeValue(value, column.type));
+      }
+    }
 
-    // Copy all encoded parts into the buffer sequentially
-    let bufferOffset = 0;
+    // Calculate total buffer size: bitmap + encoded values
+    const valuesSize = encodedParts.reduce((sum, part) => sum + part.length, 0);
+    const buffer = new Uint8Array(bitmapSize + valuesSize);
+
+    // Write bitmap first
+    buffer.set(bitmap, 0);
+
+    // Copy all encoded parts into the buffer after the bitmap
+    let bufferOffset = bitmapSize;
     for (const encodedPart of encodedParts) {
       buffer.set(encodedPart, bufferOffset);
       bufferOffset += encodedPart.length;
@@ -662,17 +463,14 @@ export class RowGroupSerializer {
   }
 
   /**
-   * Encode a single value to binary format based on its type.
+   * Encode a single non-null value to binary format based on its type.
    * Variable-length types: [length:4 bytes LE][data]
    * Fixed-length types: direct encoding (8 bytes for numbers, 1 byte for boolean)
-   * Null values: single 0x00 byte
+   *
+   * Note: Nulls are handled by the bitmap in encodeColumnValues, so this method
+   * should only be called for non-null values.
    */
   private encodeValue(value: unknown, type: ColumnDataType): Uint8Array {
-    // Null values are encoded as a single 0x00 byte
-    if (value === null || value === undefined) {
-      return new Uint8Array([0x00]);
-    }
-
     switch (type) {
       case 'string': {
         const encoder = new TextEncoder();
@@ -854,7 +652,7 @@ export class RowGroupSerializer {
     }));
 
     // Build schema with Parquet physical types and repetition rules
-    const schema: SchemaElement[] = Array.from(columns.values()).map((column) => ({
+    const schema: RowGroupSchemaElement[] = Array.from(columns.values()).map((column) => ({
       name: column.name,
       type: this.mapToParquetType(column.type),
       repetitionType: this.isRequiredColumn(column.name) ? 'REQUIRED' : 'OPTIONAL',

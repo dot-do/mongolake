@@ -1,0 +1,101 @@
+{
+  "description": "findOne",
+  "schemaVersion": "1.0",
+  "createEntities": [
+    {
+      "client": {
+        "id": "client0"
+      }
+    },
+    {
+      "database": {
+        "id": "database0",
+        "client": "client0",
+        "databaseName": "crud-v1"
+      }
+    },
+    {
+      "collection": {
+        "id": "collection0",
+        "database": "database0",
+        "collectionName": "coll"
+      }
+    }
+  ],
+  "initialData": [
+    {
+      "collectionName": "coll",
+      "databaseName": "crud-v1",
+      "documents": [
+        {
+          "_id": 1,
+          "x": 11
+        },
+        {
+          "_id": 2,
+          "x": 22
+        },
+        {
+          "_id": 3,
+          "x": 33
+        }
+      ]
+    }
+  ],
+  "tests": [
+    {
+      "description": "FindOne with filter matching one document",
+      "operations": [
+        {
+          "object": "collection0",
+          "name": "findOne",
+          "arguments": {
+            "filter": {
+              "_id": 1
+            }
+          },
+          "expectResult": {
+            "_id": 1,
+            "x": 11
+          }
+        }
+      ]
+    },
+    {
+      "description": "FindOne with filter matching no documents",
+      "operations": [
+        {
+          "object": "collection0",
+          "name": "findOne",
+          "arguments": {
+            "filter": {
+              "_id": 99
+            }
+          },
+          "expectResult": null
+        }
+      ]
+    },
+    {
+      "description": "FindOne with projection",
+      "operations": [
+        {
+          "object": "collection0",
+          "name": "findOne",
+          "arguments": {
+            "filter": {
+              "_id": 1
+            },
+            "projection": {
+              "x": 1,
+              "_id": 0
+            }
+          },
+          "expectResult": {
+            "x": 11
+          }
+        }
+      ]
+    }
+  ]
+}

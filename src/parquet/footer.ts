@@ -11,142 +11,45 @@
  */
 
 // ============================================================================
-// Type Definitions
+// Type Imports and Re-exports
 // ============================================================================
 
-/** Parquet physical types */
-export type ParquetType =
-  | 'BOOLEAN'
-  | 'INT32'
-  | 'INT64'
-  | 'INT96'
-  | 'FLOAT'
-  | 'DOUBLE'
-  | 'BYTE_ARRAY'
-  | 'FIXED_LEN_BYTE_ARRAY';
+import type {
+  ParquetType,
+  ConvertedType,
+  RepetitionType,
+  Encoding,
+  CompressionCodec,
+  ColumnStatistics,
+  SchemaElement,
+  ColumnChunkMetadata,
+  RowGroupMetadata,
+  KeyValueMetadata,
+  ColumnOrder,
+  FooterInput,
+  GeneratedParquetFooter,
+  FooterGeneratorOptions,
+} from './types.js';
 
-/** Parquet converted (logical) types */
-export type ConvertedType =
-  | 'UTF8'
-  | 'MAP'
-  | 'MAP_KEY_VALUE'
-  | 'LIST'
-  | 'ENUM'
-  | 'DECIMAL'
-  | 'DATE'
-  | 'TIME_MILLIS'
-  | 'TIME_MICROS'
-  | 'TIMESTAMP_MILLIS'
-  | 'TIMESTAMP_MICROS'
-  | 'UINT_8'
-  | 'UINT_16'
-  | 'UINT_32'
-  | 'UINT_64'
-  | 'INT_8'
-  | 'INT_16'
-  | 'INT_32'
-  | 'INT_64'
-  | 'JSON'
-  | 'BSON'
-  | 'INTERVAL';
+// Re-export all types for backwards compatibility
+export type {
+  ParquetType,
+  ConvertedType,
+  RepetitionType,
+  Encoding,
+  CompressionCodec,
+  ColumnStatistics,
+  SchemaElement,
+  ColumnChunkMetadata,
+  RowGroupMetadata,
+  KeyValueMetadata,
+  ColumnOrder,
+  FooterInput,
+  FooterGeneratorOptions,
+};
 
-/** Repetition type */
-export type RepetitionType = 'REQUIRED' | 'OPTIONAL' | 'REPEATED';
-
-/** Encoding types */
-export type Encoding =
-  | 'PLAIN'
-  | 'RLE'
-  | 'BIT_PACKED'
-  | 'DELTA_BINARY_PACKED'
-  | 'DELTA_LENGTH_BYTE_ARRAY'
-  | 'DELTA_BYTE_ARRAY'
-  | 'RLE_DICTIONARY'
-  | 'BYTE_STREAM_SPLIT';
-
-/** Compression codecs */
-export type CompressionCodec = 'none' | 'snappy' | 'gzip' | 'lzo' | 'brotli' | 'lz4' | 'zstd';
-
-/** Column statistics */
-export interface ColumnStatistics {
-  minValue?: unknown;
-  maxValue?: unknown;
-  nullCount?: number;
-  distinctCount?: number;
-}
-
-/** Schema element */
-export interface SchemaElement {
-  name: string;
-  type?: ParquetType;
-  typeLength?: number;
-  repetitionType?: RepetitionType;
-  convertedType?: ConvertedType;
-  numChildren?: number;
-  fieldId?: number;
-  children?: SchemaElement[];
-}
-
-/** Column chunk metadata */
-export interface ColumnChunkMetadata {
-  columnName: string;
-  fileOffset: number;
-  dataPageOffset?: number;
-  dictionaryPageOffset?: number;
-  compressedSize: number;
-  uncompressedSize: number;
-  numValues: number;
-  encoding: Encoding;
-  compression: CompressionCodec;
-  statistics?: ColumnStatistics;
-}
-
-/** Row group metadata */
-export interface RowGroupMetadata {
-  columns: ColumnChunkMetadata[];
-  numRows: number;
-  totalByteSize: number;
-  fileOffset: number;
-}
-
-/** Key-value metadata */
-export interface KeyValueMetadata {
-  key: string;
-  value: string;
-}
-
-/** Column order */
-export interface ColumnOrder {
-  columnOrderType: 'TYPE_DEFINED_ORDER' | 'UNDEFINED';
-}
-
-/** Footer generator input */
-export interface FooterInput {
-  schema: SchemaElement[];
-  rowGroups: RowGroupMetadata[];
-  encryptionAlgorithm?: string;
-  columnOrders?: ColumnOrder[];
-}
-
-/** Generated footer output */
-export interface ParquetFooter {
-  data: Uint8Array;
-  version: number;
-  schema: SchemaElement[];
-  numRows: number;
-  rowGroups: RowGroupMetadata[];
-  createdBy: string;
-  keyValueMetadata?: KeyValueMetadata[];
-  encryptionAlgorithm?: string;
-  columnOrders?: ColumnOrder[];
-}
-
-/** Footer generator options */
-export interface FooterGeneratorOptions {
-  version?: number;
-  createdBy?: string;
-  keyValueMetadata?: KeyValueMetadata[];
-}
+/** Generated footer output (alias for backwards compatibility) */
+export type ParquetFooter = GeneratedParquetFooter;
 
 // ============================================================================
 // Constants
@@ -216,6 +119,7 @@ const ENCODING_ENUM: Record<Encoding, number> = {
   DELTA_BYTE_ARRAY: 7,
   RLE_DICTIONARY: 8,
   BYTE_STREAM_SPLIT: 9,
+  PLAIN_DICTIONARY: 2,
 };
 
 const COMPRESSION_ENUM: Record<CompressionCodec, number> = {
@@ -342,7 +246,7 @@ class ThriftCompactWriter {
     const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
     this.writeVarInt(bytes.length);
     for (let i = 0; i < bytes.length; i++) {
-      this.buffer.push(bytes[i]);
+      this.buffer.push(bytes[i]!);
     }
   }
 
@@ -417,7 +321,7 @@ class ThriftCompactWriter {
     const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
     this.writeVarInt(bytes.length);
     for (let i = 0; i < bytes.length; i++) {
-      this.buffer.push(bytes[i]);
+      this.buffer.push(bytes[i]!);
     }
   }
 

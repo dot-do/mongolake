@@ -16,155 +16,47 @@
  */
 
 // ============================================================================
-// Type Definitions
+// Type Imports and Re-exports
 // ============================================================================
 
-/** Parquet physical types */
-export type ParquetType =
-  | 'BOOLEAN'
-  | 'INT32'
-  | 'INT64'
-  | 'INT96'
-  | 'FLOAT'
-  | 'DOUBLE'
-  | 'BYTE_ARRAY'
-  | 'FIXED_LEN_BYTE_ARRAY';
+import type {
+  ParquetType,
+  ConvertedType,
+  FieldRepetitionType,
+  Encoding,
+  CompressionCodecUppercase,
+  ColumnStatistics,
+  SchemaElement,
+  ParsedColumnChunkMetadata,
+  SortingColumn,
+  ParsedRowGroupMetadata,
+  KeyValueMetadata,
+  ParquetSchema,
+  ParsedParquetFooter,
+  LogicalType,
+} from './types.js';
 
-/** Parquet converted (logical) types */
-export type ConvertedType =
-  | 'UTF8'
-  | 'MAP'
-  | 'MAP_KEY_VALUE'
-  | 'LIST'
-  | 'ENUM'
-  | 'DECIMAL'
-  | 'DATE'
-  | 'TIME_MILLIS'
-  | 'TIME_MICROS'
-  | 'TIMESTAMP_MILLIS'
-  | 'TIMESTAMP_MICROS'
-  | 'UINT_8'
-  | 'UINT_16'
-  | 'UINT_32'
-  | 'UINT_64'
-  | 'INT_8'
-  | 'INT_16'
-  | 'INT_32'
-  | 'INT_64'
-  | 'JSON'
-  | 'BSON'
-  | 'INTERVAL';
+// Re-export types for backwards compatibility
+export type {
+  ParquetType,
+  ConvertedType,
+  FieldRepetitionType,
+  Encoding,
+  ColumnStatistics,
+  SortingColumn,
+  KeyValueMetadata,
+  ParquetSchema,
+  LogicalType,
+};
 
-/** Logical type annotation (Parquet 2.0+) */
-export interface LogicalType {
-  type: string;
-  precision?: number;
-  scale?: number;
-  isAdjustedToUTC?: boolean;
-  unit?: string;
-}
+// Re-export with original names for backwards compatibility
+export type CompressionCodec = CompressionCodecUppercase;
+export type ColumnChunkMetadata = ParsedColumnChunkMetadata;
+export type RowGroupMetadata = ParsedRowGroupMetadata;
+export type ParquetFooter = ParsedParquetFooter;
 
-/** Field repetition type */
-export type FieldRepetitionType = 'REQUIRED' | 'OPTIONAL' | 'REPEATED';
-
-/** Encoding types */
-export type Encoding =
-  | 'PLAIN'
-  | 'RLE'
-  | 'BIT_PACKED'
-  | 'DELTA_BINARY_PACKED'
-  | 'DELTA_LENGTH_BYTE_ARRAY'
-  | 'DELTA_BYTE_ARRAY'
-  | 'RLE_DICTIONARY'
-  | 'BYTE_STREAM_SPLIT'
-  | 'PLAIN_DICTIONARY';
-
-/** Compression codecs */
-export type CompressionCodec =
-  | 'UNCOMPRESSED'
-  | 'SNAPPY'
-  | 'GZIP'
-  | 'LZO'
-  | 'BROTLI'
-  | 'LZ4'
-  | 'ZSTD';
-
-/** Column statistics */
-export interface ColumnStatistics {
-  minValue?: unknown;
-  maxValue?: unknown;
-  nullCount?: number;
-  distinctCount?: number;
-}
-
-/** Schema element */
-export interface SchemaElement {
-  name: string;
-  type?: ParquetType;
-  typeLength?: number;
-  repetitionType?: FieldRepetitionType;
-  convertedType?: ConvertedType;
-  logicalType?: LogicalType | null;
-  numChildren?: number;
-  fieldId?: number;
-  scale?: number;
-  precision?: number;
-}
-
-/** Column chunk metadata */
-export interface ColumnChunkMetadata {
-  columnPath: string;
-  fileOffset: number;
-  dataPageOffset: number;
-  dictionaryPageOffset?: number;
-  compressedSize: number;
-  uncompressedSize: number;
-  numValues: number;
-  encodings: Encoding[];
-  codec: CompressionCodec;
-  statistics?: ColumnStatistics;
-  type?: ParquetType;
-}
-
-/** Sorting column specification */
-export interface SortingColumn {
-  columnIdx: number;
-  descending: boolean;
-  nullsFirst: boolean;
-}
-
-/** Row group metadata */
-export interface RowGroupMetadata {
-  columns: ColumnChunkMetadata[];
-  numRows: number;
-  totalByteSize: number;
-  fileOffset: number;
-  sortingColumns?: SortingColumn[];
-}
-
-/** Key-value metadata */
-export interface KeyValueMetadata {
-  key: string;
-  value: string;
-}
-
-/** Parquet schema container */
-export interface ParquetSchema {
-  elements: SchemaElement[];
-}
-
-/** Parsed footer result */
-export interface ParquetFooter {
-  version: number;
-  formatVersion: string;
-  schema: ParquetSchema;
-  numRows: number;
-  rowGroups: RowGroupMetadata[];
-  createdBy?: string;
-  keyValueMetadata?: KeyValueMetadata[];
-  footerLength: number;
-  footerOffset: number;
-}
+// Re-export SchemaElement (the parsed version uses FieldRepetitionType which is aliased)
+export type { SchemaElement };
 
 // ============================================================================
 // Error Classes
@@ -274,7 +166,7 @@ class BufferReader {
    */
   readUint8(): number {
     this.ensureBytes(1);
-    const value = this.buffer[this.offset];
+    const value = this.buffer[this.offset]!;
     this.offset += 1;
     return value;
   }
@@ -380,7 +272,7 @@ class BufferReader {
     if (pos >= this.buffer.length || pos < 0) {
       return -1;
     }
-    return this.buffer[pos];
+    return this.buffer[pos] ?? -1;
   }
 
   /**
@@ -550,10 +442,10 @@ export class FooterParser {
     }
     // Compare 4-byte sequence
     return (
-      buffer[offset] === MAGIC_BYTES[0] &&
-      buffer[offset + 1] === MAGIC_BYTES[1] &&
-      buffer[offset + 2] === MAGIC_BYTES[2] &&
-      buffer[offset + 3] === MAGIC_BYTES[3]
+      buffer[offset] === MAGIC_BYTES[0]! &&
+      buffer[offset + 1] === MAGIC_BYTES[1]! &&
+      buffer[offset + 2] === MAGIC_BYTES[2]! &&
+      buffer[offset + 3] === MAGIC_BYTES[3]!
     );
   }
 
@@ -655,7 +547,7 @@ export class FooterParser {
    *
    * This heuristic examines the bytes after schemaCount to determine which format.
    */
-  private detectInlineSchema(reader: BufferReader, schemaElementCount: number): boolean {
+  private detectInlineSchema(reader: BufferReader, _schemaElementCount: number): boolean {
     const byte0 = reader.peek(0);
     const byte1 = reader.peek(1);
     const byte2 = reader.peek(2);
@@ -922,7 +814,7 @@ export class FooterParser {
    */
   private createSchemaFromRowGroups(
     rowGroups: RowGroupMetadata[],
-    expectedCount: number
+    _expectedCount: number
   ): SchemaElement[] {
     const columnsByPath = new Map<string, SchemaElement>();
 
