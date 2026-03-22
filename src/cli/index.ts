@@ -2,624 +2,240 @@
 /**
  * MongoLake CLI
  *
- * Command-line interface for MongoLake operations:
- * - dev: Start a local development server
- * - shell: Interactive shell (coming soon)
- * - push/pull: Sync operations (coming soon)
- * - branch/merge: Version control (coming soon)
+ * Command-line interface for MongoLake operations, built on @dotdo/cli framework.
  */
 
-import { parseArgs } from 'node:util';
-import { startDevServer } from './dev.js';
-import { startShell } from './shell.js';
-import { startProxy } from './proxy.js';
-import { startTunnelCommand } from './tunnel.js';
-import { login, logout, whoami } from './auth.js';
-import { handleCompactCommand } from './compact.js';
-import { handlePushCommand, handlePullCommand } from './sync.js';
-
-// ============================================================================
-// Version & Help
-// ============================================================================
-
-const VERSION = '0.1.0';
-
-const HELP_TEXT = `
-mongolake - MongoDB re-imagined for the lakehouse era
-
-Usage: mongolake <command> [options]
-
-Commands:
-  dev       Start a local development server
-  shell     Start an interactive MongoDB-like shell
-  proxy     Start a wire protocol proxy to a remote MongoDB/MongoLake
-  tunnel    Create a Cloudflare tunnel to expose local MongoLake
-  compact   Trigger compaction on a collection
-  push      Upload local database to remote
-  pull      Download remote database to local
-  auth      Authentication commands (login, logout, whoami)
-  help      Show this help message
-  version   Show version information
-
-Options:
-  -h, --help      Show help
-  -v, --version   Show version
-
-Examples:
-  mongolake dev              Start dev server on default port (3456)
-  mongolake dev --port 8080  Start dev server on port 8080
-  mongolake dev --path ./data  Use custom data directory
-  mongolake shell            Start interactive shell
-  mongolake shell --path ./data  Use custom data directory
-  mongolake proxy --target mongodb://remote:27017  Start proxy
-  mongolake tunnel           Create tunnel to local dev server
-  mongolake tunnel --port 8080  Create tunnel to specific port
-  mongolake auth login       Authenticate with oauth.do
-  mongolake auth whoami      Show current user info
-  mongolake compact mydb users          Compact a collection
-  mongolake compact mydb users --dry-run  Preview compaction
-  mongolake push mydb --remote https://api.mongolake.com  Push to remote
-  mongolake pull mydb --remote https://api.mongolake.com  Pull from remote
-
-For more information, visit: https://mongolake.com/docs
-`;
-
-const DEV_HELP_TEXT = `
-mongolake dev - Start a local development server
-
-Usage: mongolake dev [options]
-
-Options:
-  -p, --port <port>    Port to listen on (default: 3456)
-  -P, --path <path>    Path to data directory (default: .mongolake)
-  -h, --host <host>    Host to bind to (default: localhost)
-  --no-cors            Disable CORS headers
-  -v, --verbose        Enable verbose logging
-
-Examples:
-  mongolake dev
-  mongolake dev --port 8080
-  mongolake dev --path ./data --verbose
-`;
-
-const SHELL_HELP_TEXT = `
-mongolake shell - Start an interactive MongoDB-like shell
-
-Usage: mongolake shell [options]
-
-Options:
-  -P, --path <path>    Path to data directory (default: .mongolake)
-  -v, --verbose        Enable verbose logging (show stack traces)
-
-Shell Commands:
-  show dbs                    List all databases
-  use <database>              Switch to a database
-  show collections            List collections in current database
-  db.<collection>.find()      Find documents
-  db.<collection>.insertOne() Insert a document
-  db.<collection>.updateOne() Update a document
-  db.<collection>.deleteOne() Delete a document
-  help                        Show available commands
-  exit / quit                 Exit the shell
-
-Examples:
-  mongolake shell
-  mongolake shell --path ./data
-  mongolake shell --verbose
-`;
-
-const PROXY_HELP_TEXT = `
-mongolake proxy - Start a wire protocol proxy to a remote MongoDB/MongoLake
-
-Usage: mongolake proxy --target <connection-string> [options]
-
-Options:
-  -t, --target <uri>   Target MongoDB/MongoLake connection string (required)
-  -p, --port <port>    Local port to listen on (default: 27017)
-  -h, --host <host>    Local host to bind to (default: 127.0.0.1)
-  --pool               Enable connection pooling
-  --pool-size <size>   Maximum pool size (default: 10)
-  -v, --verbose        Enable verbose logging (wire protocol details)
-
-Connection String Formats:
-  mongodb://host:port/database
-  mongodb://user:pass@host:port/database?authSource=admin
-  mongolake://host:port
-  host:port
-  host (defaults to port 27017)
-
-Examples:
-  mongolake proxy --target mongodb://localhost:27018
-  mongolake proxy --target mongodb://remote.example.com:27017 --port 27018
-  mongolake proxy --target mongodb://user:pass@cluster.mongodb.net:27017 --verbose
-  mongolake proxy --target mongodb://remote:27017 --pool --pool-size 20
-`;
-
-const AUTH_HELP_TEXT = `
-mongolake auth - Authentication commands
-
-Usage: mongolake auth <subcommand> [options]
-
-Subcommands:
-  login     Start device flow authentication with oauth.do
-  logout    Clear stored credentials
-  whoami    Show current user information
-
-Options:
-  --profile <name>   Use a named profile (default: "default")
-  -v, --verbose      Enable verbose output
-
-Examples:
-  mongolake auth login           Start device flow authentication
-  mongolake auth logout          Clear stored credentials
-  mongolake auth whoami          Show current user info
-  mongolake auth login --profile dev   Login to a specific profile
-`;
-
-const TUNNEL_HELP_TEXT = `
-mongolake tunnel - Create a Cloudflare tunnel to expose local MongoLake
-
-Usage: mongolake tunnel [options]
-
-Options:
-  -p, --port <port>    Port to tunnel (default: 3456)
-  -v, --verbose        Enable verbose logging
-
-Description:
-  Creates a quick Cloudflare tunnel using cloudflared to expose your local
-  MongoLake dev server to the internet. This is useful for:
-  - Testing webhooks that need a public URL
-  - Sharing your development environment temporarily
-  - Debugging remote client connections
-
-  The tunnel URL is randomly generated and valid until you stop the command.
-
-Requirements:
-  - cloudflared must be installed (run 'mongolake tunnel' for install instructions)
-  - No Cloudflare account required for quick tunnels
-
-Examples:
-  mongolake tunnel                  # Tunnel to localhost:3456
-  mongolake tunnel --port 8080      # Tunnel to localhost:8080
-  mongolake tunnel --verbose        # Show detailed cloudflared output
-`;
-
-// ============================================================================
-// Main CLI Entry Point
-// ============================================================================
-
-async function main(): Promise<void> {
-  const args = process.argv.slice(2);
-
-  // No arguments - show help
-  if (args.length === 0) {
-    console.log(HELP_TEXT);
-    process.exit(0);
-  }
-
-  const command = args[0];
-
-  // Handle global flags
-  if (command === '-h' || command === '--help' || command === 'help') {
-    console.log(HELP_TEXT);
-    process.exit(0);
-  }
-
-  if (command === '-v' || command === '--version' || command === 'version') {
-    console.log(`mongolake v${VERSION}`);
-    process.exit(0);
-  }
-
-  // Route to command handlers
-  switch (command) {
-    case 'dev':
-      await handleDevCommand(args.slice(1));
-      break;
-
-    case 'shell':
-      await handleShellCommand(args.slice(1));
-      break;
-
-    case 'proxy':
-      await handleProxyCommand(args.slice(1));
-      break;
-
-    case 'auth':
-      await handleAuthCommand(args.slice(1));
-      break;
-
-    case 'compact':
-      await handleCompactCommand(args.slice(1));
-      break;
-
-    case 'tunnel':
-      await handleTunnelCommand(args.slice(1));
-      break;
-
-    case 'push':
-      await handlePushCommand(args.slice(1));
-      break;
-
-    case 'pull':
-      await handlePullCommand(args.slice(1));
-      break;
-
-    case 'branch':
-    case 'merge':
-      console.log(`${command} command not yet implemented. Coming soon!`);
-      process.exit(1);
-      break;
-
-    default:
-      console.error(`Unknown command: ${command}`);
-      console.log(HELP_TEXT);
-      process.exit(1);
-  }
-}
-
-// ============================================================================
-// Dev Command Handler
-// ============================================================================
-
-interface DevOptions {
-  port: number;
-  path: string;
-  host: string;
-  cors: boolean;
-  verbose: boolean;
-}
-
-async function handleDevCommand(args: string[]): Promise<void> {
-  // Check for help flag
-  if (args.includes('-h') || args.includes('--help')) {
-    console.log(DEV_HELP_TEXT);
-    process.exit(0);
-  }
-
-  // Parse dev command options
-  let options: DevOptions;
-
-  try {
-    const { values } = parseArgs({
-      args,
-      options: {
-        port: {
-          type: 'string',
-          short: 'p',
-          default: '3456',
-        },
-        path: {
-          type: 'string',
-          short: 'P',
-          default: '.mongolake',
-        },
-        host: {
-          type: 'string',
-          short: 'h',
-          default: 'localhost',
-        },
-        cors: {
-          type: 'boolean',
-          default: true,
-        },
-        verbose: {
-          type: 'boolean',
-          short: 'v',
-          default: false,
-        },
-      },
-      allowPositionals: true,
-    });
-
-    options = {
-      port: parseInt(values.port as string, 10),
-      path: values.path as string,
-      host: values.host as string,
-      cors: values.cors as boolean,
-      verbose: values.verbose as boolean,
-    };
-
-    // Validate port
-    if (isNaN(options.port) || options.port < 1 || options.port > 65535) {
-      console.error(`Invalid port: ${values.port}. Port must be between 1 and 65535.`);
-      process.exit(1);
-    }
-  } catch (error) {
-    console.error('Error parsing arguments:', (error as Error).message);
-    console.log(DEV_HELP_TEXT);
-    process.exit(1);
-  }
-
-  // Start the development server
-  await startDevServer(options);
-}
-
-// ============================================================================
-// Shell Command Handler
-// ============================================================================
-
-interface ShellOptions {
-  path: string;
-  verbose: boolean;
-}
-
-async function handleShellCommand(args: string[]): Promise<void> {
-  // Check for help flag
-  if (args.includes('-h') || args.includes('--help')) {
-    console.log(SHELL_HELP_TEXT);
-    process.exit(0);
-  }
-
-  // Parse shell command options
-  let options: ShellOptions;
-
-  try {
-    const { values } = parseArgs({
-      args,
-      options: {
-        path: {
-          type: 'string',
-          short: 'P',
-          default: '.mongolake',
-        },
-        verbose: {
-          type: 'boolean',
-          short: 'v',
-          default: false,
-        },
-      },
-      allowPositionals: true,
-    });
-
-    options = {
-      path: values.path as string,
-      verbose: values.verbose as boolean,
-    };
-  } catch (error) {
-    console.error('Error parsing arguments:', (error as Error).message);
-    console.log(SHELL_HELP_TEXT);
-    process.exit(1);
-  }
-
-  // Start the interactive shell
-  await startShell(options);
-}
-
-// ============================================================================
-// Proxy Command Handler
-// ============================================================================
-
-interface ProxyOptions {
-  target: string;
-  port: number;
-  host: string;
-  pool: boolean;
-  poolSize: number;
-  verbose: boolean;
-}
-
-async function handleProxyCommand(args: string[]): Promise<void> {
-  // Check for help flag
-  if (args.includes('-h') || args.includes('--help')) {
-    console.log(PROXY_HELP_TEXT);
-    process.exit(0);
-  }
-
-  // Parse proxy command options
-  let options: ProxyOptions;
-
-  try {
-    const { values } = parseArgs({
-      args,
-      options: {
-        target: {
-          type: 'string',
-          short: 't',
-        },
-        port: {
-          type: 'string',
-          short: 'p',
-          default: '27017',
-        },
-        host: {
-          type: 'string',
-          short: 'h',
-          default: '127.0.0.1',
-        },
-        pool: {
-          type: 'boolean',
-          default: false,
-        },
-        'pool-size': {
-          type: 'string',
-          default: '10',
-        },
-        verbose: {
-          type: 'boolean',
-          short: 'v',
-          default: false,
-        },
-      },
-      allowPositionals: true,
-    });
-
-    // Target is required
-    if (!values.target) {
-      console.error('Error: --target is required');
-      console.log(PROXY_HELP_TEXT);
-      process.exit(1);
-    }
-
-    options = {
-      target: values.target as string,
-      port: parseInt(values.port as string, 10),
-      host: values.host as string,
-      pool: values.pool as boolean,
-      poolSize: parseInt(values['pool-size'] as string, 10),
-      verbose: values.verbose as boolean,
-    };
-
-    // Validate port
-    if (isNaN(options.port) || options.port < 1 || options.port > 65535) {
-      console.error(`Invalid port: ${values.port}. Port must be between 1 and 65535.`);
-      process.exit(1);
-    }
-
-    // Validate pool size
-    if (isNaN(options.poolSize) || options.poolSize < 1) {
-      console.error(`Invalid pool size: ${values['pool-size']}. Pool size must be at least 1.`);
-      process.exit(1);
-    }
-  } catch (error) {
-    console.error('Error parsing arguments:', (error as Error).message);
-    console.log(PROXY_HELP_TEXT);
-    process.exit(1);
-  }
-
-  // Start the proxy server
-  await startProxy(options);
-}
-
-// ============================================================================
-// Auth Command Handler
-// ============================================================================
-
-interface AuthOptions {
-  profile?: string;
-  verbose: boolean;
-}
-
-async function handleAuthCommand(args: string[]): Promise<void> {
-  // Check for help flag
-  if (args.includes('-h') || args.includes('--help') || args.length === 0) {
-    console.log(AUTH_HELP_TEXT);
-    if (args.length === 0) {
-      process.exit(1);
-    }
-    process.exit(0);
-  }
-
-  const subcommand = args[0];
-
-  // Parse auth command options
-  let options: AuthOptions;
-
-  try {
-    const { values } = parseArgs({
-      args: args.slice(1),
-      options: {
-        profile: {
-          type: 'string',
-          default: 'default',
-        },
-        verbose: {
-          type: 'boolean',
-          short: 'v',
-          default: false,
-        },
-      },
-      allowPositionals: true,
-    });
-
-    options = {
-      profile: values.profile as string,
-      verbose: values.verbose as boolean,
-    };
-  } catch (error) {
-    console.error('Error parsing arguments:', (error as Error).message);
-    console.log(AUTH_HELP_TEXT);
-    process.exit(1);
-  }
-
-  // Route to subcommand handlers
-  switch (subcommand) {
-    case 'login': {
-      const result = await login(options);
-      process.exit(result.success ? 0 : 1);
-      break;
-    }
-
-    case 'logout': {
-      const success = await logout(options);
-      process.exit(success ? 0 : 1);
-      break;
-    }
-
-    case 'whoami': {
-      const result = await whoami(options);
-      process.exit(result.authenticated ? 0 : 1);
-      break;
-    }
-
-    default:
-      console.error(`Unknown auth subcommand: ${subcommand}`);
-      console.log(AUTH_HELP_TEXT);
-      process.exit(1);
-  }
-}
-
-// ============================================================================
-// Tunnel Command Handler
-// ============================================================================
-
-interface TunnelOptions {
-  port: number;
-  verbose: boolean;
-}
-
-async function handleTunnelCommand(args: string[]): Promise<void> {
-  // Check for help flag
-  if (args.includes('-h') || args.includes('--help')) {
-    console.log(TUNNEL_HELP_TEXT);
-    process.exit(0);
-  }
-
-  // Parse tunnel command options
-  let options: TunnelOptions;
-
-  try {
-    const { values } = parseArgs({
-      args,
-      options: {
-        port: {
-          type: 'string',
-          short: 'p',
-          default: '3456',
-        },
-        verbose: {
-          type: 'boolean',
-          short: 'v',
-          default: false,
-        },
-      },
-      allowPositionals: true,
-    });
-
-    options = {
-      port: parseInt(values.port as string, 10),
-      verbose: values.verbose as boolean,
-    };
-
-    // Validate port
-    if (isNaN(options.port) || options.port < 1 || options.port > 65535) {
-      console.error(`Invalid port: ${values.port}. Port must be between 1 and 65535.`);
-      process.exit(1);
-    }
-  } catch (error) {
-    console.error('Error parsing arguments:', (error as Error).message);
-    console.log(TUNNEL_HELP_TEXT);
-    process.exit(1);
-  }
-
-  // Start the tunnel
-  await startTunnelCommand(options);
-}
-
-// ============================================================================
-// Run
-// ============================================================================
-
-main().catch((error) => {
-  console.error('Fatal error:', error);
-  process.exit(1);
-});
+import { createCLI } from '@dotdo/cli/framework'
+import { startDevServer } from './dev.js'
+import { startShell } from './shell.js'
+import { startProxy } from './proxy.js'
+import { startTunnelCommand } from './tunnel.js'
+import { login, logout, whoami } from './auth.js'
+import { runCompact } from './compact.js'
+import { runPush, runPull } from './sync.js'
+
+const app = createCLI({
+  name: 'mongolake',
+  version: '0.1.0',
+  description: 'MongoDB re-imagined for the lakehouse era',
+  examples: [
+    'mongolake dev              Start dev server on default port (3456)',
+    'mongolake dev --port 8080  Start dev server on port 8080',
+    'mongolake shell            Start interactive shell',
+    'mongolake proxy --target mongodb://remote:27017  Start proxy',
+    'mongolake tunnel           Create tunnel to local dev server',
+    'mongolake auth login       Authenticate with oauth.do',
+    'mongolake compact mydb users          Compact a collection',
+    'mongolake push mydb --remote https://api.mongolake.com  Push to remote',
+    'mongolake pull mydb --remote https://api.mongolake.com  Pull from remote',
+  ],
+})
+
+// ── dev ──────────────────────────────────────────────────────────────────────
+
+app.command('dev', 'Start a local development server')
+  .option('-p, --port <port>', 'Port to listen on', {
+    type: 'number', default: 3456,
+    validator: (v: unknown) => { const n = Number(v); if (n < 1 || n > 65535) throw new Error('Port must be between 1 and 65535') }
+  })
+  .option('-P, --path <path>', 'Path to data directory', { default: '.mongolake' })
+  .option('--host <host>', 'Host to bind to', { default: 'localhost' })
+  .option('--no-cors', 'Disable CORS headers')
+  .option('-v, --verbose', 'Enable verbose logging')
+  .example('mongolake dev                     Start dev server on default port')
+  .example('mongolake dev --port 8080         Start dev server on port 8080')
+  .example('mongolake dev --no-cors           Start without CORS headers')
+  .action(async (opts) => {
+    await startDevServer({
+      port: opts.port as number,
+      path: opts.path as string,
+      host: opts.host as string,
+      cors: opts.cors as boolean,
+      verbose: opts.verbose as boolean,
+    })
+  })
+
+// ── shell ────────────────────────────────────────────────────────────────────
+
+app.command('shell', 'Start an interactive MongoDB-like shell')
+  .option('-P, --path <path>', 'Path to data directory', { default: '.mongolake' })
+  .option('-v, --verbose', 'Enable verbose logging (show stack traces)')
+  .action(async (opts) => {
+    await startShell({
+      path: opts.path as string,
+      verbose: opts.verbose as boolean,
+    })
+  })
+
+// ── proxy ────────────────────────────────────────────────────────────────────
+
+app.command('proxy', 'Start a wire protocol proxy to a remote MongoDB/MongoLake')
+  .option('-t, --target <uri>', 'Target MongoDB/MongoLake connection string')
+  .requiredOption()
+  .option('-p, --port <port>', 'Local port to listen on', {
+    type: 'number', default: 27017,
+    validator: (v: unknown) => { const n = Number(v); if (n < 1 || n > 65535) throw new Error('Port must be between 1 and 65535') }
+  })
+  .option('--host <host>', 'Local host to bind to', { default: '127.0.0.1' })
+  .option('--pool', 'Enable connection pooling')
+  .option('--pool-size <size>', 'Maximum pool size', {
+    type: 'number', default: 10,
+    validator: (v: unknown) => { if (Number(v) < 1) throw new Error('Pool size must be at least 1') }
+  })
+  .option('-v, --verbose', 'Enable verbose logging (wire protocol details)')
+  .example('mongolake proxy --target mongodb://localhost:27017')
+  .example('mongolake proxy --target mongodb://remote:27017 --pool --pool-size 20')
+  .action(async (opts) => {
+    await startProxy({
+      target: opts.target as string,
+      port: opts.port as number,
+      host: opts.host as string,
+      pool: opts.pool as boolean,
+      poolSize: opts['pool-size'] as number,
+      verbose: opts.verbose as boolean,
+    })
+  })
+
+// ── compact ──────────────────────────────────────────────────────────────────
+
+app.command('compact', 'Trigger compaction on a collection')
+  .argument('<database>', 'Database name')
+  .argument('<collection>', 'Collection name')
+  .option('-P, --path <path>', 'Path to data directory', { default: '.mongolake' })
+  .option('-n, --dry-run', 'Show what would be compacted without making changes')
+  .option('-v, --verbose', 'Enable verbose logging')
+  .action(async (opts, args) => {
+    await runCompact({
+      database: args.database as string,
+      collection: args.collection as string,
+      path: opts.path as string,
+      dryRun: opts['dry-run'] as boolean,
+      verbose: opts.verbose as boolean,
+    })
+  })
+
+// ── push ─────────────────────────────────────────────────────────────────────
+
+app.command('push', 'Upload local database to remote')
+  .argument('<database>', 'Database name')
+  .option('-r, --remote <url>', 'Remote URL to sync with')
+  .requiredOption()
+  .option('-P, --path <path>', 'Path to data directory', { default: '.mongolake' })
+  .option('-n, --dry-run', 'Show what would be synced without making changes')
+  .option('-f, --force', 'Force sync even if there are conflicts')
+  .option('--profile <name>', 'Authentication profile', { default: 'default' })
+  .option('-v, --verbose', 'Enable verbose logging')
+  .example('mongolake push mydb --remote https://api.mongolake.com')
+  .example('mongolake push mydb --remote https://api.mongolake.com --dry-run')
+  .action(async (opts, args) => {
+    const result = await runPush({
+      database: args.database as string,
+      remote: opts.remote as string,
+      path: opts.path as string,
+      dryRun: opts['dry-run'] as boolean,
+      force: opts.force as boolean,
+      profile: opts.profile as string,
+      verbose: opts.verbose as boolean,
+    })
+    return result.success ? 0 : 1
+  })
+
+// ── pull ─────────────────────────────────────────────────────────────────────
+
+app.command('pull', 'Download remote database to local')
+  .argument('<database>', 'Database name')
+  .option('-r, --remote <url>', 'Remote URL to sync with')
+  .requiredOption()
+  .option('-P, --path <path>', 'Path to data directory', { default: '.mongolake' })
+  .option('-n, --dry-run', 'Show what would be synced without making changes')
+  .option('-f, --force', 'Force sync even if there are conflicts')
+  .option('--profile <name>', 'Authentication profile', { default: 'default' })
+  .option('-v, --verbose', 'Enable verbose logging')
+  .example('mongolake pull mydb --remote https://api.mongolake.com')
+  .example('mongolake pull mydb --remote https://api.mongolake.com --force')
+  .action(async (opts, args) => {
+    const result = await runPull({
+      database: args.database as string,
+      remote: opts.remote as string,
+      path: opts.path as string,
+      dryRun: opts['dry-run'] as boolean,
+      force: opts.force as boolean,
+      profile: opts.profile as string,
+      verbose: opts.verbose as boolean,
+    })
+    return result.success ? 0 : 1
+  })
+
+// ── tunnel ───────────────────────────────────────────────────────────────────
+
+app.command('tunnel', 'Create a Cloudflare tunnel to expose local MongoLake')
+  .option('-p, --port <port>', 'Port to tunnel', { type: 'number', default: 3456 })
+  .option('-v, --verbose', 'Enable verbose logging')
+  .action(async (opts) => {
+    await startTunnelCommand({
+      port: opts.port as number,
+      verbose: opts.verbose as boolean,
+    })
+  })
+
+// ── auth ─────────────────────────────────────────────────────────────────────
+
+const authCmd = app.command('auth', 'Authentication commands (login, logout, whoami)')
+  .action(() => {
+    console.log('Usage: mongolake auth <command>\n')
+    console.log('Commands:')
+    console.log('  login     Log in to MongoLake')
+    console.log('  logout    Log out')
+    console.log('  whoami    Show current user')
+    return 1
+  })
+
+authCmd.subcommand('login', 'Start device flow authentication with oauth.do')
+  .option('--profile <name>', 'Use a named profile', { default: 'default' })
+  .option('-v, --verbose', 'Enable verbose output')
+  .action(async (opts) => {
+    const result = await login({
+      profile: opts.profile as string,
+      verbose: opts.verbose as boolean,
+    })
+    return result.success ? 0 : 1
+  })
+
+authCmd.subcommand('logout', 'Clear stored credentials')
+  .option('--profile <name>', 'Use a named profile', { default: 'default' })
+  .option('-v, --verbose', 'Enable verbose output')
+  .action(async (opts) => {
+    const success = await logout({
+      profile: opts.profile as string,
+      verbose: opts.verbose as boolean,
+    })
+    return success ? 0 : 1
+  })
+
+authCmd.subcommand('whoami', 'Show current user information')
+  .option('--profile <name>', 'Use a named profile', { default: 'default' })
+  .option('-v, --verbose', 'Enable verbose output')
+  .action(async (opts) => {
+    const result = await whoami({
+      profile: opts.profile as string,
+      verbose: opts.verbose as boolean,
+    })
+    return result.authenticated ? 0 : 1
+  })
+
+// ── branch / merge (stubs) ──────────────────────────────────────────────
+
+app.command('branch', 'Create a branch (coming soon)')
+  .action(() => { console.log('branch command not yet implemented. Coming soon!'); return 1 })
+
+app.command('merge', 'Merge a branch (coming soon)')
+  .action(() => { console.log('merge command not yet implemented. Coming soon!'); return 1 })
+
+// ── run ──────────────────────────────────────────────────────────────────────
+
+app.parse(process.argv.slice(2)).then((code) => {
+  if (code !== 0) process.exit(code)
+}).catch((error) => {
+  console.error('Fatal error:', error)
+  process.exit(1)
+})

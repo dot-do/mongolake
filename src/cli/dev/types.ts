@@ -22,6 +22,8 @@ export interface DevServerOptions {
   path?: string;
   /** Enable verbose logging */
   verbose?: boolean;
+  /** Enable CORS headers (default: true) */
+  cors?: boolean;
   /** Enable file watching and hot reload (default: true) */
   watch?: boolean;
   /** Use Miniflare instead of Wrangler */
